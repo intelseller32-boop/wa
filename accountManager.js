@@ -10,7 +10,7 @@ const { useDBAuthState } = require("./dbAuthState");
 const { getPool, isConfigured } = require("./db");
 const settingsStore = require("./settingsStore");
 const warningStore = require("./warningStore");
-const { LINK_REGEX } = require("./config");
+const { LINK_REGEX, WHITELISTED_LINK_DOMAINS } = require("./config");
 
 const logger = P({ level: "silent" });
 const MAX_RECONNECT_ATTEMPTS = 5;
@@ -44,7 +44,12 @@ function containsBannedWord(text, bannedWords) {
 
 function containsLink(text) {
   if (!text) return false;
-  return LINK_REGEX.test(text);
+  const matches = text.match(new RegExp(LINK_REGEX.source, "gi"));
+  if (!matches) return false;
+  // Only a violation if at least one link isn't on the whitelist.
+  return matches.some(
+    (link) => !WHITELISTED_LINK_DOMAINS.some((domain) => link.toLowerCase().includes(domain.toLowerCase()))
+  );
 }
 
 function fillTemplate(template, { user, count, max }) {
@@ -94,6 +99,7 @@ async function createAccount(label) {
     pairingCode: null,
     phoneNumber: null,
     groups: new Map(),
+    pinnedWelcome: new Map(),
     reconnectAttempts: 0
   });
   return id;
@@ -120,6 +126,7 @@ async function startAccount(id, phoneNumber, isRetry = false) {
       pairingCode: null,
       phoneNumber,
       groups: new Map(),
+      pinnedWelcome: new Map(),
       reconnectAttempts: 0
     };
     liveAccounts.set(id, runtime);
@@ -232,10 +239,35 @@ async function startAccount(id, phoneNumber, isRetry = false) {
       const settings = await settingsStore.getSettings(id, groupId);
       for (const userId of participants) {
         const text = fillTemplate(settings.welcome_message, { user: userId });
-        await sock.sendMessage(groupId, { text, mentions: [userId] });
+        let sent;
+        try {
+          sent = await sock.sendMessage(groupId, { text, mentions: [userId] });
+        } catch (err) {
+          console.error(`[${id}] failed to send welcome message:`, err.message);
+          continue;
+        }
+        await pinWelcomeMessage(groupId, sent);
       }
     }
   });
+
+  async function pinWelcomeMessage(groupId, sent) {
+    if (!sent?.key) return;
+    const previousKey = runtime.pinnedWelcome.get(groupId);
+    if (previousKey) {
+      try {
+        await sock.sendMessage(groupId, { pin: { type: 0, time: 2592000, key: previousKey } });
+      } catch (err) {
+        console.error(`[${id}] failed to unpin previous welcome message:`, err.message);
+      }
+    }
+    try {
+      await sock.sendMessage(groupId, { pin: { type: 1, time: 2592000, key: sent.key } });
+      runtime.pinnedWelcome.set(groupId, sent.key);
+    } catch (err) {
+      console.error(`[${id}] failed to pin welcome message (bot may not be admin):`, err.message);
+    }
+  }
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
@@ -332,6 +364,7 @@ async function resumeAccountsFromDB() {
       pairingCode: null,
       phoneNumber: row.phone_number,
       groups: new Map(),
+      pinnedWelcome: new Map(),
       reconnectAttempts: 0
     });
     if (row.status !== "disconnected") {

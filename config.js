@@ -13,6 +13,12 @@ module.exports = {
   // Regex to detect links (covers http/https, www., and common shorteners)
   LINK_REGEX: /(https?:\/\/|www\.)[^\s]+/i,
 
+  // Domains that are always allowed, even though they're links. A message is
+  // only treated as a link violation if it contains a link NOT on this list.
+  WHITELISTED_LINK_DOMAINS: [
+    "intelseller.com"
+  ],
+
   // Default message templates (editable from the dashboard). {user}, {count}, {max} placeholders.
   WELCOME_MESSAGE: "👋 Welcome {user}! Please read the group rules. No links or banned words allowed.",
   WARNING_MESSAGE: "⚠️ {user} your message was removed (banned content). Warning {count}/{max}.",
