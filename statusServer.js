@@ -37,12 +37,14 @@ function serializeAccount(a, runtime) {
   const groups = runtime
     ? Array.from(runtime.groups.entries()).map(([id, name]) => ({ id, name }))
     : [];
+  const base = describeStatus(status);
   return {
     id: a.id,
     label: a.label,
     phone_number: a.phone_number || runtime?.phoneNumber || "",
     status,
-    ...describeStatus(status),
+    ...base,
+    helper: runtime?.lastError || base.helper,
     hasQr: Boolean(runtime?.qr),
     pairingCode: runtime?.pairingCode || null,
     groupCount: groups.length,

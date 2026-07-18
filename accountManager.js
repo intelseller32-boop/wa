@@ -1,7 +1,8 @@
 const {
   default: makeWASocket,
   DisconnectReason,
-  fetchLatestBaileysVersion
+  fetchLatestBaileysVersion,
+  Browsers
 } = require("@whiskeysockets/baileys");
 const crypto = require("crypto");
 const P = require("pino");
@@ -13,9 +14,27 @@ const { LINK_REGEX } = require("./config");
 
 const logger = P({ level: "silent" });
 const MAX_RECONNECT_ATTEMPTS = 5;
+const STALL_TIMEOUT_MS = 25000; // if nothing happens within this long, stop spinning and show an error
 
-// accountId -> { label, status, qr, pairingCode, groups: Map(id->name), sock, reconnectAttempts }
+// accountId -> { label, status, qr, pairingCode, groups: Map(id->name), sock, reconnectAttempts, lastError }
 const liveAccounts = new Map();
+
+// fetchLatestBaileysVersion() calls out to GitHub before a QR can even be
+// generated. On some hosts that call can hang or fail silently, which is a
+// known cause of the dashboard spinning on "Connecting..." forever. Race it
+// against a timeout and fall back to the version bundled with the library
+// instead of hanging the whole connection attempt.
+async function getBaileysVersion(id) {
+  try {
+    const versionPromise = fetchLatestBaileysVersion();
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("timed out")), 8000));
+    const { version } = await Promise.race([versionPromise, timeout]);
+    return version;
+  } catch (err) {
+    console.warn(`[${id}] could not fetch latest Baileys version (${err.message}), using bundled default.`);
+    return undefined;
+  }
+}
 
 function containsBannedWord(text, bannedWords) {
   if (!text) return false;
@@ -91,7 +110,7 @@ async function refreshGroups(id) {
   }
 }
 
-async function startAccount(id, phoneNumber) {
+async function startAccount(id, phoneNumber, isRetry = false) {
   let runtime = liveAccounts.get(id);
   if (!runtime) {
     runtime = {
@@ -106,12 +125,36 @@ async function startAccount(id, phoneNumber) {
     liveAccounts.set(id, runtime);
   }
   runtime.phoneNumber = phoneNumber || runtime.phoneNumber;
+  runtime.status = "connecting";
+  runtime.lastError = null;
+  runtime.qr = null;
+  runtime.pairingCode = null;
+  if (!isRetry) runtime.reconnectAttempts = 0;
 
   const { state, saveCreds } = await useDBAuthState(id);
-  const { version } = await fetchLatestBaileysVersion();
+  const version = await getBaileysVersion(id);
 
-  const sock = makeWASocket({ version, auth: state, logger, printQRInTerminal: false });
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    logger,
+    printQRInTerminal: false,
+    browser: Browsers.ubuntu("Chrome"),
+    connectTimeoutMs: 30000,
+    keepAliveIntervalMs: 20000
+  });
   runtime.sock = sock;
+
+  // Safety net: if WhatsApp never responds at all (no qr/pairing/open/close),
+  // don't leave the dashboard spinning on "Connecting..." forever.
+  const stallTimer = setTimeout(async () => {
+    if (runtime.sock === sock && runtime.status === "connecting") {
+      console.error(`[${id}] connection attempt stalled - no response from WhatsApp within ${STALL_TIMEOUT_MS / 1000}s.`);
+      runtime.status = "error";
+      runtime.lastError = "Couldn't reach WhatsApp's servers in time. Tap Reconnect to try again.";
+      await setAccountStatus(id, "error");
+    }
+  }, STALL_TIMEOUT_MS);
 
   sock.ev.on("creds.update", saveCreds);
 
@@ -128,6 +171,7 @@ async function startAccount(id, phoneNumber) {
   }
 
   sock.ev.on("connection.update", async (update) => {
+    clearTimeout(stallTimer);
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
@@ -149,27 +193,32 @@ async function startAccount(id, phoneNumber) {
       if (fatalReasons.includes(statusCode)) {
         console.error(`[${id}] fatal disconnect (${statusCode}): ${errorMsg}`);
         runtime.status = "disconnected";
+        runtime.lastError = statusCode === DisconnectReason.loggedOut
+          ? "This device was logged out from WhatsApp. Remove it and add it again to relink."
+          : `Connection closed: ${errorMsg}`;
         await setAccountStatus(id, "disconnected");
         return;
       }
 
       runtime.reconnectAttempts = (runtime.reconnectAttempts || 0) + 1;
       if (runtime.reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
-        console.error(`[${id}] gave up reconnecting after ${MAX_RECONNECT_ATTEMPTS} attempts.`);
+        console.error(`[${id}] gave up reconnecting after ${MAX_RECONNECT_ATTEMPTS} attempts (${errorMsg}).`);
         runtime.status = "error";
+        runtime.lastError = `Gave up after ${MAX_RECONNECT_ATTEMPTS} attempts: ${errorMsg}. Tap Reconnect to try again.`;
         await setAccountStatus(id, "error");
         return;
       }
 
       const delay = Math.min(30000, 2000 * 2 ** (runtime.reconnectAttempts - 1));
       console.log(`[${id}] connection closed (${errorMsg}). Retrying in ${delay / 1000}s.`);
-      setTimeout(() => startAccount(id, runtime.phoneNumber), delay);
+      setTimeout(() => startAccount(id, runtime.phoneNumber, true), delay);
     } else if (connection === "open") {
       console.log(`[${id}] connected to WhatsApp.`);
       runtime.status = "connected";
       runtime.qr = null;
       runtime.pairingCode = null;
       runtime.reconnectAttempts = 0;
+      runtime.lastError = null;
       await setAccountStatus(id, "connected");
       refreshGroups(id);
     }
