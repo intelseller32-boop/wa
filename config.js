@@ -25,5 +25,10 @@ module.exports = {
   WARNINGS_FILE: "./warnings.json",
 
   // Auth session folder (Baileys will store login creds here)
-  AUTH_FOLDER: "./auth_info"
+  AUTH_FOLDER: "./auth_info",
+
+  // If set, use pairing-code login instead of QR code.
+  // Format: full number with country code, digits only, no + or spaces (e.g. "2348012345678")
+  // Can also be set via the PHONE_NUMBER environment variable (recommended on Railway).
+  PHONE_NUMBER: process.env.PHONE_NUMBER || ""
 };

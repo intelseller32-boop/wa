@@ -19,7 +19,8 @@ const {
   WELCOME_MESSAGE,
   WARNING_MESSAGE,
   KICK_MESSAGE,
-  AUTH_FOLDER
+  AUTH_FOLDER,
+  PHONE_NUMBER
 } = require("./config");
 const warningStore = require("./warningStore");
 
@@ -54,10 +55,26 @@ async function startBot() {
     version,
     auth: state,
     logger,
-    printQRInTerminal: false // we handle QR manually below for clearer output
+    printQRInTerminal: false // we handle QR/pairing code manually below
   });
 
   sock.ev.on("creds.update", saveCreds);
+
+  // Pairing-code login: if PHONE_NUMBER is set and this session isn't registered yet,
+  // request a short code to type into WhatsApp instead of scanning a QR.
+  if (PHONE_NUMBER && !sock.authState.creds.registered) {
+    setTimeout(async () => {
+      try {
+        const code = await sock.requestPairingCode(PHONE_NUMBER);
+        console.log("=======================================");
+        console.log(`PAIRING CODE: ${code}`);
+        console.log("On your phone: WhatsApp > Settings > Linked Devices > Link a Device > Link with phone number instead > enter this code.");
+        console.log("=======================================");
+      } catch (err) {
+        console.error("Failed to request pairing code:", err.message);
+      }
+    }, 3000);
+  }
 
   // Connection lifecycle: shows QR code, handles reconnects with backoff + a hard stop
   sock.ev.on("connection.update", (update) => {
