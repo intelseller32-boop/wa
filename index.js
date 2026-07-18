@@ -1,3 +1,9 @@
+// Baileys needs globalThis.crypto (Web Crypto API), which is only a native
+// Node.js global since Node 19. Polyfill it for older Node versions (e.g. Node 18).
+if (typeof globalThis.crypto === "undefined") {
+  globalThis.crypto = require("node:crypto").webcrypto;
+}
+
 const {
   default: makeWASocket,
   useMultiFileAuthState,
