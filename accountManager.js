@@ -35,20 +35,17 @@ function fillTemplate(template, { user, count, max }) {
     .replace("{max}", max ?? "");
 }
 
+// The in-memory liveAccounts map is the source of truth once the server is
+// running (populated at boot by resumeAccountsFromDB, kept in sync by
+// createAccount/deleteAccount). Listing never touches the database, so
+// polling the dashboard doesn't cost you MySQL queries on Railway.
 async function listAccounts() {
-  if (!isConfigured()) {
-    return Array.from(liveAccounts.entries()).map(([id, a]) => ({
-      id,
-      label: a.label,
-      phone_number: a.phoneNumber || "",
-      status: a.status
-    }));
-  }
-  const pool = getPool();
-  const [rows] = await pool.query(
-    "SELECT id, label, phone_number, status FROM accounts ORDER BY created_at"
-  );
-  return rows.map((r) => ({ ...r, status: liveAccounts.get(r.id)?.status || r.status }));
+  return Array.from(liveAccounts.entries()).map(([id, a]) => ({
+    id,
+    label: a.label,
+    phone_number: a.phoneNumber || "",
+    status: a.status
+  }));
 }
 
 async function setAccountStatus(id, status) {
@@ -244,27 +241,55 @@ async function startAccount(id, phoneNumber) {
   });
 }
 
-// On startup, reconnect any accounts that were previously connected/connecting,
-// using their saved session in the database - no re-scan needed.
+async function deleteAccount(id) {
+  const runtime = liveAccounts.get(id);
+  if (runtime?.sock) {
+    try {
+      await runtime.sock.logout();
+    } catch (err) {
+      // ignore - account may already be disconnected
+    }
+    try {
+      runtime.sock.end(undefined);
+    } catch (err) {
+      // ignore
+    }
+  }
+  liveAccounts.delete(id);
+
+  if (isConfigured()) {
+    const pool = getPool();
+    await pool.query("DELETE FROM accounts WHERE id = ?", [id]);
+    await pool.query("DELETE FROM auth_data WHERE account_id = ?", [id]);
+    await pool.query("DELETE FROM settings WHERE account_id = ?", [id]);
+    await pool.query("DELETE FROM warnings WHERE account_id = ?", [id]);
+  }
+}
+
+// On startup, load every saved account into the in-memory map (so the
+// dashboard can list them without hitting the database), and reconnect any
+// that were previously connected/connecting using their saved session -
+// no re-scan needed. Accounts saved as 'disconnected' are listed but not
+// auto-started; the user reconnects them manually from the dashboard.
 async function resumeAccountsFromDB() {
   if (!isConfigured()) return;
   const pool = getPool();
-  const [rows] = await pool.query(
-    "SELECT id, label, phone_number FROM accounts WHERE status != 'disconnected'"
-  );
+  const [rows] = await pool.query("SELECT id, label, phone_number, status FROM accounts");
   for (const row of rows) {
     liveAccounts.set(row.id, {
       label: row.label,
-      status: "connecting",
+      status: row.status === "disconnected" ? "disconnected" : "connecting",
       qr: null,
       pairingCode: null,
       phoneNumber: row.phone_number,
       groups: new Map(),
       reconnectAttempts: 0
     });
-    startAccount(row.id, row.phone_number).catch((err) =>
-      console.error(`Failed to resume account ${row.id}:`, err.message)
-    );
+    if (row.status !== "disconnected") {
+      startAccount(row.id, row.phone_number).catch((err) =>
+        console.error(`Failed to resume account ${row.id}:`, err.message)
+      );
+    }
   }
 }
 
@@ -274,5 +299,6 @@ module.exports = {
   startAccount,
   getAccountRuntime,
   refreshGroups,
-  resumeAccountsFromDB
+  resumeAccountsFromDB,
+  deleteAccount
 };
