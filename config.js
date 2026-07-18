@@ -1,8 +1,9 @@
 module.exports = {
-  // How many warnings before a user is removed
+  // Default max warnings before removal (used as a fallback / starting point;
+  // editable per-account and per-group from the web dashboard)
   MAX_WARNINGS: 3,
 
-  // Words that trigger a warning (lowercase, no spaces needed - substring match)
+  // Default banned words list (editable from the dashboard)
   BANNED_WORDS: [
     "badword1",
     "badword2",
@@ -12,23 +13,13 @@ module.exports = {
   // Regex to detect links (covers http/https, www., and common shorteners)
   LINK_REGEX: /(https?:\/\/|www\.)[^\s]+/i,
 
-  // Welcome message template. {user} is replaced with @mention
+  // Default message templates (editable from the dashboard). {user}, {count}, {max} placeholders.
   WELCOME_MESSAGE: "👋 Welcome {user}! Please read the group rules. No links or banned words allowed.",
-
-  // Warning message template. {user}=mention, {count}=current warning count, {max}=max warnings
   WARNING_MESSAGE: "⚠️ {user} your message was removed (banned content). Warning {count}/{max}.",
-
-  // Message sent right before kicking
   KICK_MESSAGE: "🚫 {user} has been removed after reaching {max} warnings.",
 
-  // File where warning counts are persisted (so they survive restarts)
-  WARNINGS_FILE: "./warnings.json",
-
-  // Auth session folder (Baileys will store login creds here)
-  AUTH_FOLDER: "./auth_info",
-
-  // If set, use pairing-code login instead of QR code.
-  // Format: full number with country code, digits only, no + or spaces (e.g. "2348012345678")
-  // Can also be set via the PHONE_NUMBER environment variable (recommended on Railway).
-  PHONE_NUMBER: process.env.PHONE_NUMBER || ""
+  // Dashboard login (protects the whole web dashboard, including QR/pairing codes).
+  // Set ADMIN_PASSWORD in Railway's Variables tab. Dashboard is disabled until it's set.
+  ADMIN_USERNAME: process.env.ADMIN_USERNAME || "admin",
+  ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || ""
 };

@@ -1,34 +1,42 @@
-const fs = require("fs");
-const { WARNINGS_FILE } = require("./config");
+const { getPool, isConfigured } = require("./db");
 
-function load() {
-  try {
-    return JSON.parse(fs.readFileSync(WARNINGS_FILE, "utf8"));
-  } catch {
-    return {};
-  }
+const memoryWarnings = {};
+
+function key(accountId, groupId, userId) {
+  return `${accountId}_${groupId}_${userId}`;
 }
 
-function save(data) {
-  fs.writeFileSync(WARNINGS_FILE, JSON.stringify(data, null, 2));
+async function increment(accountId, groupId, userId) {
+  if (!isConfigured()) {
+    const k = key(accountId, groupId, userId);
+    memoryWarnings[k] = (memoryWarnings[k] || 0) + 1;
+    return memoryWarnings[k];
+  }
+
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO warnings (account_id, group_id, user_id, count) VALUES (?, ?, ?, 1)
+     ON DUPLICATE KEY UPDATE count = count + 1`,
+    [accountId, groupId, userId]
+  );
+  const [rows] = await pool.query(
+    "SELECT count FROM warnings WHERE account_id = ? AND group_id = ? AND user_id = ?",
+    [accountId, groupId, userId]
+  );
+  return rows[0].count;
 }
 
-let warnings = load();
-
-module.exports = {
-  // key = `${groupId}_${userId}`
-  get(groupId, userId) {
-    return warnings[`${groupId}_${userId}`] || 0;
-  },
-  increment(groupId, userId) {
-    const key = `${groupId}_${userId}`;
-    warnings[key] = (warnings[key] || 0) + 1;
-    save(warnings);
-    return warnings[key];
-  },
-  reset(groupId, userId) {
-    const key = `${groupId}_${userId}`;
-    delete warnings[key];
-    save(warnings);
+async function reset(accountId, groupId, userId) {
+  if (!isConfigured()) {
+    delete memoryWarnings[key(accountId, groupId, userId)];
+    return;
   }
-};
+
+  const pool = getPool();
+  await pool.query(
+    "DELETE FROM warnings WHERE account_id = ? AND group_id = ? AND user_id = ?",
+    [accountId, groupId, userId]
+  );
+}
+
+module.exports = { increment, reset };

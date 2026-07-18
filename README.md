@@ -1,35 +1,49 @@
-# WhatsApp Group Moderation Bot
+# WhatsApp Group Moderation Bot - Multi-Account Dashboard
 
-Welcome messages, link/banned-word filtering, warnings, and auto-kick — built with Baileys (no Chromium needed, fits ModVC's free tier).
+Add and manage multiple WhatsApp accounts from a web dashboard. Each account can be linked via QR code or phone-number pairing code, chosen right on the site. Sessions, settings, and warning counts are all stored in your MySQL database, so nothing is lost on redeploy/restart.
 
-## Setup
+## Railway Environment Variables
 
-1. Edit `config.js`:
-   - `BANNED_WORDS` — your list
-   - `MAX_WARNINGS` — how many strikes before removal
-   - Message templates
+Set these in your Railway service -> Variables tab:
 
-2. **The bot account must be a group admin** to delete others' messages and remove members.
+| Variable | Required? | Example | Purpose |
+|---|---|---|---|
+| DATABASE_URL | Strongly recommended | mysql://user:pass@host:port/dbname | Persists accounts, sessions, settings, warnings. Without it, everything works but resets on every restart. |
+| ADMIN_PASSWORD | Required to open the dashboard | any strong password | The whole dashboard (including QR/pairing codes) is locked behind this. |
+| ADMIN_USERNAME | Optional | admin (default) | Dashboard login username. |
+| PORT | Auto-set by Railway | - | Do not set manually. |
 
-## Run locally (optional, for testing)
+Note: paste your MySQL connection string directly into Railway's Variables tab -- never share it in chat or commit it to GitHub. You do NOT need a PHONE_NUMBER variable anymore -- phone numbers are entered per-account on the dashboard itself.
 
-```
+## After deploying
+
+1. Railway -> Settings -> Networking -> Generate Domain (needed to reach the dashboard)
+2. Visit https://your-domain.up.railway.app/ -- log in with ADMIN_USERNAME / ADMIN_PASSWORD
+3. Fill in the "Add WhatsApp Account" form:
+   - Give it a label (e.g. "Main group")
+   - Choose "Scan QR code" or "Enter phone number (pairing code)"
+   - If pairing code, type the number with country code, no + or spaces (e.g. 2348121697423)
+4. You're taken to that account's page, which shows the QR image or pairing code (auto-refreshing) until it connects
+5. Once connected, the account page lists every group that WhatsApp account belongs to
+6. Click "Edit settings for this group" on any group to customize its welcome/warning/kick messages and banned words, OR click "Edit default settings" to set values that apply to every group on that account unless a group has its own override
+
+## Adding more accounts
+
+Go back to the dashboard root (/), fill the "Add WhatsApp Account" form again. Each account runs independently with its own session, groups, and settings.
+
+## Bot must be group admin
+
+Each linked WhatsApp account must be an admin in a group for the bot to delete others' messages and remove members there.
+
+## Local testing (optional)
+
 npm install
 npm start
-```
 
-Scan the QR code printed in the terminal with WhatsApp → Linked Devices.
-
-## Deploy on ModVC
-
-1. Push this folder to your GitHub repo.
-2. In ModVC panel: pull/upload the repo, select Node.js 18 runtime.
-3. Start the app — dependencies auto-install via `npm install` (package.json is already set up).
-4. Open the **live console** — it will print a QR code as ASCII art.
-5. On your phone: WhatsApp → Settings → Linked Devices → Link a Device → scan the QR shown in the console.
-6. Once connected, the console prints "✅ Bot connected to WhatsApp." Session credentials are saved to the `auth_info/` folder so you won't need to re-scan on restart (as long as that folder persists between deploys — check ModVC's storage persistence for your tier).
+Then open http://localhost:3000
 
 ## Notes
 
-- `warnings.json` and `auth_info/` are created automatically at runtime — don't delete them unless you want to reset warnings/session.
-- If ModVC's free 128MB tier struggles, Baileys itself is lightweight; growth in RAM usage is usually from many concurrent groups/messages, not the library itself.
+- Message templates support {user}, {count}, {max} placeholders where relevant.
+- Without DATABASE_URL, the dashboard still works, but every account, session, setting, and warning count is wiped on restart -- add the database as soon as you can.
+- No Railway volume is needed anymore -- WhatsApp sessions now live in the database, not on disk.
