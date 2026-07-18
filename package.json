@@ -1,0 +1,18 @@
+{
+  "name": "wa-mod-bot",
+  "version": "1.0.0",
+  "description": "WhatsApp group moderation bot - welcome, link/word filter, warnings, auto-kick",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "qrcode-terminal": "^0.12.0",
+    "pino": "^9.4.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
