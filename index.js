@@ -37,6 +37,9 @@ function fillTemplate(template, { user, count, max }) {
     .replace("{max}", max ?? "");
 }
 
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
   const { version } = await fetchLatestBaileysVersion();
@@ -50,7 +53,7 @@ async function startBot() {
 
   sock.ev.on("creds.update", saveCreds);
 
-  // Connection lifecycle: shows QR code, handles reconnects
+  // Connection lifecycle: shows QR code, handles reconnects with backoff + a hard stop
   sock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect, qr } = update;
 
@@ -61,11 +64,38 @@ async function startBot() {
 
     if (connection === "close") {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      console.log("Connection closed. Reconnecting:", shouldReconnect);
-      if (shouldReconnect) startBot();
+      const errorMsg = lastDisconnect?.error?.message || "unknown error";
+
+      const fatalReasons = [
+        DisconnectReason.loggedOut,
+        DisconnectReason.badSession,
+        DisconnectReason.connectionReplaced,
+        DisconnectReason.multideviceMismatch
+      ];
+
+      if (fatalReasons.includes(statusCode)) {
+        console.error(
+          `Fatal disconnect (code ${statusCode}): ${errorMsg}. Not reconnecting - delete the auth_info folder/volume and redeploy to re-scan the QR code.`
+        );
+        return;
+      }
+
+      reconnectAttempts++;
+      if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+        console.error(
+          `Gave up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts (last error: ${errorMsg}). Stopping to avoid a reconnect loop.`
+        );
+        return;
+      }
+
+      const delayMs = Math.min(30000, 2000 * 2 ** (reconnectAttempts - 1));
+      console.log(
+        `Connection closed (code ${statusCode}, ${errorMsg}). Reconnect attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${delayMs / 1000}s.`
+      );
+      setTimeout(startBot, delayMs);
     } else if (connection === "open") {
-      console.log("✅ Bot connected to WhatsApp.");
+      console.log("Bot connected to WhatsApp.");
+      reconnectAttempts = 0;
     }
   });
 
