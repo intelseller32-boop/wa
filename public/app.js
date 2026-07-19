@@ -364,7 +364,8 @@ async function renderGroupSettings(accountId, groupId) {
   const s = data.settings;
   document.getElementById("group-body").innerHTML = `
     <div class="topbar"><h1>${escapeHtml(data.groupName)}</h1></div>
-    <form id="settings-form">
+
+    <form id="settings-form" style="margin-top:22px">
       <label>Welcome message (use {user} for the mention)</label>
       <textarea name="welcome_message" rows="3">${escapeHtml(s.welcome_message)}</textarea>
 
@@ -382,6 +383,27 @@ async function renderGroupSettings(accountId, groupId) {
 
       <button type="submit" class="full" style="margin-top:20px">Save Settings</button>
     </form>
+
+    <div class="section-title" style="margin-top:28px">Auto-Reply Messages</div>
+    <p class="helper" style="margin:0 0 12px">When a message contains one of these keywords, the bot replies automatically.</p>
+
+    <form id="auto-reply-form" class="card" style="display:block">
+      <label>Keyword (e.g. hello)</label>
+      <input type="text" name="keyword" placeholder="hello" required />
+
+      <label>Match type</label>
+      <select name="match_type">
+        <option value="contains">Message contains this word</option>
+        <option value="exact">Message is exactly this word</option>
+      </select>
+
+      <label>Auto-reply text</label>
+      <textarea name="reply_text" rows="3" placeholder="Hi there! How can I help?" required></textarea>
+
+      <button type="submit" class="full" style="margin-top:14px">Add Auto-Reply</button>
+    </form>
+
+    <div id="auto-reply-list" style="margin-top:14px">Loading…</div>
   `;
 
   document.getElementById("settings-form").onsubmit = async (e) => {
@@ -402,4 +424,77 @@ async function renderGroupSettings(accountId, groupId) {
     btn.disabled = false;
     btn.textContent = "Save Settings";
   };
+
+  document.getElementById("auto-reply-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const btn = e.target.querySelector("button[type=submit]");
+    btn.disabled = true;
+    btn.textContent = "Adding…";
+    try {
+      await api(`/api/accounts/${accountId}/groups/${encodeURIComponent(groupId)}/auto-replies`, {
+        method: "POST",
+        body: JSON.stringify(Object.fromEntries(fd.entries()))
+      });
+      e.target.reset();
+      toast("Auto-reply added");
+      await refreshAutoReplies(accountId, groupId);
+    } catch (err) {
+      toast(err.message);
+    }
+    btn.disabled = false;
+    btn.textContent = "Add Auto-Reply";
+  };
+
+  await refreshAutoReplies(accountId, groupId);
+}
+
+async function refreshAutoReplies(accountId, groupId) {
+  const listEl = document.getElementById("auto-reply-list");
+  if (!listEl) return;
+
+  let rules;
+  try {
+    ({ rules } = await api(`/api/accounts/${accountId}/groups/${encodeURIComponent(groupId)}/auto-replies`));
+  } catch (e) {
+    listEl.innerHTML = `<div class="empty">Could not load auto-replies.</div>`;
+    return;
+  }
+
+  if (!rules.length) {
+    listEl.innerHTML = `<div class="empty">No auto-replies yet. Add one above.</div>`;
+    return;
+  }
+
+  listEl.innerHTML = rules
+    .map(
+      (r) => `
+      <div class="card" data-rid="${escapeHtml(r.id)}" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <div>
+          <div class="name">${escapeHtml(r.keyword)} <span class="sub">(${r.match_type === "exact" ? "exact" : "contains"})</span></div>
+          <div class="sub">${escapeHtml(r.reply_text)}</div>
+        </div>
+        <button type="button" class="danger auto-reply-delete-btn" data-rid="${escapeHtml(r.id)}">Delete</button>
+      </div>
+    `
+    )
+    .join("");
+
+  listEl.querySelectorAll(".auto-reply-delete-btn").forEach((btn) => {
+    btn.onclick = async () => {
+      if (!confirm("Delete this auto-reply?")) return;
+      btn.disabled = true;
+      try {
+        await api(
+          `/api/accounts/${accountId}/groups/${encodeURIComponent(groupId)}/auto-replies/${btn.dataset.rid}`,
+          { method: "DELETE" }
+        );
+        toast("Auto-reply deleted");
+        await refreshAutoReplies(accountId, groupId);
+      } catch (err) {
+        toast(err.message);
+        btn.disabled = false;
+      }
+    };
+  });
 }
