@@ -10,6 +10,7 @@ const { useDBAuthState } = require("./dbAuthState");
 const { getPool, isConfigured } = require("./db");
 const settingsStore = require("./settingsStore");
 const warningStore = require("./warningStore");
+const autoReplyStore = require("./autoReplyStore");
 const { LINK_REGEX, WHITELISTED_LINK_DOMAINS } = require("./config");
 
 const logger = P({ level: "silent" });
@@ -269,6 +270,33 @@ async function startAccount(id, phoneNumber, isRetry = false) {
     }
   }
 
+  // groupId -> { admins: Set<jid>, fetchedAt: number }
+  const groupAdminCache = new Map();
+  const ADMIN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes; avoids hammering groupMetadata (rate-overlimit)
+
+  async function isGroupAdmin(groupId, userId) {
+    const cached = groupAdminCache.get(groupId);
+    if (cached && Date.now() - cached.fetchedAt < ADMIN_CACHE_TTL_MS) {
+      return cached.admins.has(userId);
+    }
+
+    try {
+      const metadata = await sock.groupMetadata(groupId);
+      const admins = new Set(
+        metadata.participants
+          .filter((p) => p.admin === "admin" || p.admin === "superadmin")
+          .map((p) => p.id)
+      );
+      groupAdminCache.set(groupId, { admins, fetchedAt: Date.now() });
+      return admins.has(userId);
+    } catch (err) {
+      console.error(`[${id}] failed to fetch group metadata for admin check:`, err.message);
+      // Fail closed on the side of NOT moderating if we can't confirm admin status,
+      // to avoid falsely punishing an admin when the lookup itself fails.
+      return cached ? cached.admins.has(userId) : false;
+    }
+  }
+
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
 
@@ -278,9 +306,6 @@ async function startAccount(id, phoneNumber, isRetry = false) {
       const groupId = msg.key.remoteJid;
       if (!groupId?.endsWith("@g.us")) continue;
 
-      const settings = await settingsStore.getSettings(id, groupId);
-      const bannedWords = settings.banned_words.split("\n").map((w) => w.trim()).filter(Boolean);
-      const maxWarnings = parseInt(settings.max_warnings, 10) || 3;
       const senderId = msg.key.participant || msg.key.remoteJid;
 
       const text =
@@ -289,6 +314,23 @@ async function startAccount(id, phoneNumber, isRetry = false) {
         msg.message.imageMessage?.caption ||
         msg.message.videoMessage?.caption ||
         "";
+
+      // Auto-reply runs for everyone, admins included - it's not a moderation action.
+      try {
+        const rules = await autoReplyStore.getMatchingRules(id, groupId);
+        const match = autoReplyStore.findMatch(rules, text);
+        if (match) {
+          await sock.sendMessage(groupId, { text: match.reply_text });
+        }
+      } catch (err) {
+        console.error(`[${id}] auto-reply failed:`, err.message);
+      }
+
+      if (await isGroupAdmin(groupId, senderId)) continue;
+
+      const settings = await settingsStore.getSettings(id, groupId);
+      const bannedWords = settings.banned_words.split("\n").map((w) => w.trim()).filter(Boolean);
+      const maxWarnings = parseInt(settings.max_warnings, 10) || 3;
 
       const violatesLink = containsLink(text);
       const violatesWord = containsBannedWord(text, bannedWords);

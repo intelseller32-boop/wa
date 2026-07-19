@@ -3,6 +3,7 @@ const express = require("express");
 const QRCode = require("qrcode");
 const accountManager = require("./accountManager");
 const settingsStore = require("./settingsStore");
+const autoReplyStore = require("./autoReplyStore");
 const { ADMIN_USERNAME, ADMIN_PASSWORD } = require("./config");
 
 function requireAdmin(req, res, next) {
@@ -128,6 +129,33 @@ function startServer(port) {
       max_warnings: String(parseInt(max_warnings, 10) || 3),
       banned_words
     });
+    res.json({ ok: true });
+  });
+
+  app.get("/api/accounts/:id/groups/:groupId/auto-replies", async (req, res) => {
+    const { id, groupId } = req.params;
+    const rules = await autoReplyStore.listAutoReplies(id, groupId);
+    res.json({ rules });
+  });
+
+  app.post("/api/accounts/:id/groups/:groupId/auto-replies", async (req, res) => {
+    const { id, groupId } = req.params;
+    const { keyword, reply_text, match_type } = req.body || {};
+    if (!keyword || !keyword.trim()) return res.status(400).json({ error: "Keyword is required." });
+    if (!reply_text || !reply_text.trim()) return res.status(400).json({ error: "Reply text is required." });
+    const rule = await autoReplyStore.addAutoReply(
+      id,
+      groupId,
+      keyword.trim(),
+      reply_text.trim(),
+      match_type === "exact" ? "exact" : "contains"
+    );
+    res.json({ rule });
+  });
+
+  app.delete("/api/accounts/:id/groups/:groupId/auto-replies/:ruleId", async (req, res) => {
+    const { id, ruleId } = req.params;
+    await autoReplyStore.deleteAutoReply(id, ruleId);
     res.json({ ok: true });
   });
 

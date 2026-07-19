@@ -66,6 +66,21 @@ async function initDb() {
     )
   `);
 
+  // Auto-reply keyword -> response pairs. group_id = '_default' means "applies to
+  // all groups on this account unless a group has its own entries", same pattern as `settings`.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS auto_replies (
+      id VARCHAR(36) PRIMARY KEY,
+      account_id VARCHAR(36) NOT NULL,
+      group_id VARCHAR(128) NOT NULL DEFAULT '_default',
+      keyword VARCHAR(255) NOT NULL,
+      reply_text TEXT NOT NULL,
+      match_type VARCHAR(16) NOT NULL DEFAULT 'contains',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_account_group (account_id, group_id)
+    )
+  `);
+
   console.log("Connected to MySQL database and verified tables.");
 }
 
