@@ -385,9 +385,10 @@ async function renderGroupSettings(accountId, groupId) {
     </form>
 
     <div class="section-title" style="margin-top:28px">Auto-Reply Messages</div>
-    <p class="helper" style="margin:0 0 12px">When a message contains one of these keywords, the bot replies automatically.</p>
+    <p class="helper" style="margin:0 0 12px">When a message contains one of these keywords, the bot replies automatically. Use {user} in the reply to mention whoever sent the message.</p>
 
     <form id="auto-reply-form" class="card" style="display:block">
+      <input type="hidden" name="rule_id" value="" />
       <label>Keyword (e.g. hello)</label>
       <input type="text" name="keyword" placeholder="hello" required />
 
@@ -397,10 +398,13 @@ async function renderGroupSettings(accountId, groupId) {
         <option value="exact">Message is exactly this word</option>
       </select>
 
-      <label>Auto-reply text</label>
-      <textarea name="reply_text" rows="3" placeholder="Hi there! How can I help?" required></textarea>
+      <label>Auto-reply text (use {user} for the mention)</label>
+      <textarea name="reply_text" rows="3" placeholder="Hi {user}! How can I help?" required></textarea>
 
-      <button type="submit" class="full" style="margin-top:14px">Add Auto-Reply</button>
+      <div style="display:flex;gap:10px;margin-top:14px">
+        <button type="submit" class="full" id="auto-reply-submit-btn">Add Auto-Reply</button>
+        <button type="button" class="full secondary" id="auto-reply-cancel-btn" style="display:none">Cancel</button>
+      </div>
     </form>
 
     <div id="auto-reply-list" style="margin-top:14px">Loading…</div>
@@ -425,25 +429,42 @@ async function renderGroupSettings(accountId, groupId) {
     btn.textContent = "Save Settings";
   };
 
-  document.getElementById("auto-reply-form").onsubmit = async (e) => {
+  const autoReplyForm = document.getElementById("auto-reply-form");
+  const cancelBtn = document.getElementById("auto-reply-cancel-btn");
+
+  function resetAutoReplyForm() {
+    autoReplyForm.reset();
+    autoReplyForm.querySelector("[name=rule_id]").value = "";
+    document.getElementById("auto-reply-submit-btn").textContent = "Add Auto-Reply";
+    cancelBtn.style.display = "none";
+  }
+
+  cancelBtn.onclick = () => resetAutoReplyForm();
+
+  autoReplyForm.onsubmit = async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
-    const btn = e.target.querySelector("button[type=submit]");
+    const { rule_id, ...body } = Object.fromEntries(fd.entries());
+    const isEdit = !!rule_id;
+    const btn = document.getElementById("auto-reply-submit-btn");
     btn.disabled = true;
-    btn.textContent = "Adding…";
+    btn.textContent = isEdit ? "Saving…" : "Adding…";
     try {
-      await api(`/api/accounts/${accountId}/groups/${encodeURIComponent(groupId)}/auto-replies`, {
-        method: "POST",
-        body: JSON.stringify(Object.fromEntries(fd.entries()))
+      const url = isEdit
+        ? `/api/accounts/${accountId}/groups/${encodeURIComponent(groupId)}/auto-replies/${rule_id}`
+        : `/api/accounts/${accountId}/groups/${encodeURIComponent(groupId)}/auto-replies`;
+      await api(url, {
+        method: isEdit ? "PUT" : "POST",
+        body: JSON.stringify(body)
       });
-      e.target.reset();
-      toast("Auto-reply added");
+      resetAutoReplyForm();
+      toast(isEdit ? "Auto-reply updated" : "Auto-reply added");
       await refreshAutoReplies(accountId, groupId);
     } catch (err) {
       toast(err.message);
+      btn.disabled = false;
+      btn.textContent = isEdit ? "Save Changes" : "Add Auto-Reply";
     }
-    btn.disabled = false;
-    btn.textContent = "Add Auto-Reply";
   };
 
   await refreshAutoReplies(accountId, groupId);
@@ -474,11 +495,29 @@ async function refreshAutoReplies(accountId, groupId) {
           <div class="name">${escapeHtml(r.keyword)} <span class="sub">(${r.match_type === "exact" ? "exact" : "contains"})</span></div>
           <div class="sub">${escapeHtml(r.reply_text)}</div>
         </div>
-        <button type="button" class="danger auto-reply-delete-btn" data-rid="${escapeHtml(r.id)}">Delete</button>
+        <div style="display:flex;gap:8px">
+          <button type="button" class="auto-reply-edit-btn" data-rid="${escapeHtml(r.id)}">Edit</button>
+          <button type="button" class="danger auto-reply-delete-btn" data-rid="${escapeHtml(r.id)}">Delete</button>
+        </div>
       </div>
     `
     )
     .join("");
+
+  listEl.querySelectorAll(".auto-reply-edit-btn").forEach((btn) => {
+    btn.onclick = () => {
+      const rule = rules.find((r) => r.id === btn.dataset.rid);
+      if (!rule) return;
+      const form = document.getElementById("auto-reply-form");
+      form.querySelector("[name=rule_id]").value = rule.id;
+      form.querySelector("[name=keyword]").value = rule.keyword;
+      form.querySelector("[name=match_type]").value = rule.match_type === "exact" ? "exact" : "contains";
+      form.querySelector("[name=reply_text]").value = rule.reply_text;
+      document.getElementById("auto-reply-submit-btn").textContent = "Save Changes";
+      document.getElementById("auto-reply-cancel-btn").style.display = "";
+      form.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
+  });
 
   listEl.querySelectorAll(".auto-reply-delete-btn").forEach((btn) => {
     btn.onclick = async () => {
