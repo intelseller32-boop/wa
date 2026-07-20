@@ -24,6 +24,10 @@ module.exports = {
   WARNING_MESSAGE: "⚠️ {user} your message was removed (banned content). Warning {count}/{max}.",
   KICK_MESSAGE: "🚫 {user} has been removed after reaching {max} warnings.",
 
+  // Whether tagging this group in a WhatsApp status counts as a violation
+  // (deleted + warned like banned words/links). Off by default. "1" = on, "0" = off.
+  BLOCK_STATUS_MENTIONS: "0",
+
   // Dashboard login (protects the whole web dashboard, including QR/pairing codes).
   // Set ADMIN_PASSWORD in Railway's Variables tab. Dashboard is disabled until it's set.
   ADMIN_USERNAME: process.env.ADMIN_USERNAME || "admin",

@@ -121,13 +121,14 @@ function startServer(port) {
 
   app.post("/api/accounts/:id/groups/:groupId/settings", async (req, res) => {
     const { id, groupId } = req.params;
-    const { welcome_message, warning_message, kick_message, max_warnings, banned_words } = req.body || {};
+    const { welcome_message, warning_message, kick_message, max_warnings, banned_words, block_status_mentions } = req.body || {};
     await settingsStore.updateSettings(id, groupId, {
       welcome_message,
       warning_message,
       kick_message,
       max_warnings: String(parseInt(max_warnings, 10) || 3),
-      banned_words
+      banned_words,
+      block_status_mentions: block_status_mentions === "1" ? "1" : "0"
     });
     res.json({ ok: true });
   });

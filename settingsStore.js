@@ -6,7 +6,8 @@ const DEFAULT_SETTINGS = {
   warning_message: defaults.WARNING_MESSAGE,
   kick_message: defaults.KICK_MESSAGE,
   max_warnings: String(defaults.MAX_WARNINGS),
-  banned_words: defaults.BANNED_WORDS.join("\n")
+  banned_words: defaults.BANNED_WORDS.join("\n"),
+  block_status_mentions: defaults.BLOCK_STATUS_MENTIONS
 };
 
 const memoryStore = {}; // `${accountId}:${groupId}` -> partial settings object

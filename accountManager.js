@@ -53,6 +53,14 @@ function containsLink(text) {
   );
 }
 
+// When someone tags this group in their WhatsApp status, WhatsApp drops a
+// special protocol message into the group chat itself (not normal text) so
+// members can tap through to view it. Baileys surfaces that as a
+// `groupMentionedMessage` field on the message object.
+function isGroupStatusMention(msg) {
+  return !!msg.message?.groupMentionedMessage;
+}
+
 function fillTemplate(template, { user, count, max }) {
   return (template || "")
     .replace("{user}", user ? `@${user.split("@")[0]}` : "")
@@ -335,7 +343,8 @@ async function startAccount(id, phoneNumber, isRetry = false) {
 
       const violatesLink = containsLink(text);
       const violatesWord = containsBannedWord(text, bannedWords);
-      if (!violatesLink && !violatesWord) continue;
+      const violatesStatusMention = settings.block_status_mentions === "1" && isGroupStatusMention(msg);
+      if (!violatesLink && !violatesWord && !violatesStatusMention) continue;
 
       try {
         await sock.sendMessage(groupId, {
