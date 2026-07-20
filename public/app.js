@@ -381,6 +381,11 @@ async function renderGroupSettings(accountId, groupId) {
       <label>Banned words (one per line)</label>
       <textarea name="banned_words" rows="8">${escapeHtml(s.banned_words)}</textarea>
 
+      <label class="checkbox-row" style="display:flex;align-items:center;gap:8px;margin-top:14px">
+        <input type="checkbox" name="block_status_mentions" ${s.block_status_mentions === "1" ? "checked" : ""} />
+        <span>Treat status mentions as banned content (delete + warn if someone tags this group in their WhatsApp status)</span>
+      </label>
+
       <button type="submit" class="full" style="margin-top:20px">Save Settings</button>
     </form>
 
@@ -413,13 +418,15 @@ async function renderGroupSettings(accountId, groupId) {
   document.getElementById("settings-form").onsubmit = async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
+    const body = Object.fromEntries(fd.entries());
+    body.block_status_mentions = e.target.querySelector("[name=block_status_mentions]").checked ? "1" : "0";
     const btn = e.target.querySelector("button[type=submit]");
     btn.disabled = true;
     btn.textContent = "Saving…";
     try {
       await api(`/api/accounts/${accountId}/groups/${encodeURIComponent(groupId)}/settings`, {
         method: "POST",
-        body: JSON.stringify(Object.fromEntries(fd.entries()))
+        body: JSON.stringify(body)
       });
       toast("Settings saved");
     } catch (err) {
