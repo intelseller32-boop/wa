@@ -67,6 +67,29 @@ async function addAutoReply(accountId, groupId, keyword, replyText, matchType = 
   return row;
 }
 
+async function updateAutoReply(accountId, ruleId, keyword, replyText, matchType = "contains") {
+  if (!isConfigured()) {
+    const list = memList(accountId);
+    const row = list.find((r) => r.id === ruleId);
+    if (!row) return null;
+    row.keyword = keyword;
+    row.reply_text = replyText;
+    row.match_type = matchType;
+    return row;
+  }
+
+  const pool = getPool();
+  await pool.query(
+    "UPDATE auto_replies SET keyword = ?, reply_text = ?, match_type = ? WHERE account_id = ? AND id = ?",
+    [keyword, replyText, matchType, accountId, ruleId]
+  );
+  const [rows] = await pool.query(
+    "SELECT id, keyword, reply_text, match_type FROM auto_replies WHERE account_id = ? AND id = ?",
+    [accountId, ruleId]
+  );
+  return rows[0] || null;
+}
+
 async function deleteAutoReply(accountId, ruleId) {
   if (!isConfigured()) {
     memoryStore[accountId] = memList(accountId).filter((r) => r.id !== ruleId);
@@ -95,4 +118,11 @@ function findMatch(rules, text) {
   return null;
 }
 
-module.exports = { listAutoReplies, getMatchingRules, addAutoReply, deleteAutoReply, findMatch };
+module.exports = {
+  listAutoReplies,
+  getMatchingRules,
+  addAutoReply,
+  updateAutoReply,
+  deleteAutoReply,
+  findMatch
+};

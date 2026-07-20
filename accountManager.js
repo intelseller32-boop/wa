@@ -320,7 +320,8 @@ async function startAccount(id, phoneNumber, isRetry = false) {
         const rules = await autoReplyStore.getMatchingRules(id, groupId);
         const match = autoReplyStore.findMatch(rules, text);
         if (match) {
-          await sock.sendMessage(groupId, { text: match.reply_text });
+          const replyText = fillTemplate(match.reply_text, { user: senderId });
+          await sock.sendMessage(groupId, { text: replyText, mentions: [senderId] });
         }
       } catch (err) {
         console.error(`[${id}] auto-reply failed:`, err.message);

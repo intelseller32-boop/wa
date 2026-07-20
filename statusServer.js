@@ -153,6 +153,22 @@ function startServer(port) {
     res.json({ rule });
   });
 
+  app.put("/api/accounts/:id/groups/:groupId/auto-replies/:ruleId", async (req, res) => {
+    const { id, ruleId } = req.params;
+    const { keyword, reply_text, match_type } = req.body || {};
+    if (!keyword || !keyword.trim()) return res.status(400).json({ error: "Keyword is required." });
+    if (!reply_text || !reply_text.trim()) return res.status(400).json({ error: "Reply text is required." });
+    const rule = await autoReplyStore.updateAutoReply(
+      id,
+      ruleId,
+      keyword.trim(),
+      reply_text.trim(),
+      match_type === "exact" ? "exact" : "contains"
+    );
+    if (!rule) return res.status(404).json({ error: "Auto-reply not found." });
+    res.json({ rule });
+  });
+
   app.delete("/api/accounts/:id/groups/:groupId/auto-replies/:ruleId", async (req, res) => {
     const { id, ruleId } = req.params;
     await autoReplyStore.deleteAutoReply(id, ruleId);
