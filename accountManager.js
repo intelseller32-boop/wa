@@ -58,7 +58,15 @@ function containsLink(text) {
 // members can tap through to view it. Baileys surfaces that as a
 // `groupMentionedMessage` field on the message object.
 function isGroupStatusMention(msg) {
-  return !!msg.message?.groupMentionedMessage;
+  const m = msg.message;
+  if (!m) return false;
+  return !!(
+    m.groupMentionedMessage ||
+    m.groupStatusMentionMessage ||
+    m.groupStatusMessage ||
+    m.groupStatusMessageV2 ||
+    m.statusMentionMessage
+  );
 }
 
 function fillTemplate(template, { user, count, max }) {
