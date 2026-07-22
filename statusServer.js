@@ -4,9 +4,16 @@ const QRCode = require("qrcode");
 const accountManager = require("./accountManager");
 const settingsStore = require("./settingsStore");
 const autoReplyStore = require("./autoReplyStore");
-const { ADMIN_USERNAME, ADMIN_PASSWORD } = require("./config");
+const { ADMIN_USERNAME, ADMIN_PASSWORD, WABOT_API_KEY } = require("./config");
 
 function requireAdmin(req, res, next) {
+  // Server-to-server calls (e.g. another app's backend) authenticate with a
+  // static API key instead of the human dashboard login. Checked first and
+  // independently of ADMIN_PASSWORD being set, so the API still works even
+  // on a deployment that has disabled the human dashboard.
+  if (WABOT_API_KEY && req.headers["x-api-key"] === WABOT_API_KEY) {
+    return next();
+  }
   if (!ADMIN_PASSWORD) {
     return res
       .status(503)
@@ -28,7 +35,8 @@ function describeStatus(status) {
     pairing: { statusLabel: "Waiting for pairing code", color: "#f9a825", helper: "Enter the code below in WhatsApp." },
     connected: { statusLabel: "Connected", color: "#2e7d32", helper: "This account is live and moderating its groups." },
     disconnected: { statusLabel: "Disconnected", color: "#888", helper: "Tap Reconnect to bring it back online." },
-    error: { statusLabel: "Connection error", color: "#c62828", helper: "Something went wrong. Tap Reconnect to try again." }
+    error: { statusLabel: "Connection error", color: "#c62828", helper: "Something went wrong. Tap Reconnect to try again." },
+    paused: { statusLabel: "Paused", color: "#888", helper: "Paused until the plan is renewed." }
   };
   return map[status] || { statusLabel: status, color: "#888", helper: "" };
 }
@@ -94,6 +102,15 @@ function startServer(port) {
       console.error("reconnect error:", err.message)
     );
     res.json({ ok: true });
+  });
+
+  // Stops the connection without deleting its session — called by an
+  // external billing layer (e.g. a marketplace app) when a plan lapses.
+  // Resuming later (reconnect) does not require a new QR/pairing scan.
+  app.post("/api/accounts/:id/pause", async (req, res) => {
+    const result = await accountManager.pauseAccount(req.params.id);
+    if (!result.ok) return res.status(404).json(result);
+    res.json(result);
   });
 
   app.post("/api/accounts/:id/refresh-groups", async (req, res) => {

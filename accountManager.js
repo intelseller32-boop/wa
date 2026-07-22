@@ -122,6 +122,33 @@ async function createAccount(label) {
   return id;
 }
 
+// Stops the live connection WITHOUT deleting its saved session — used when
+// a plan/subscription lapses. Unlike deleteAccount, resuming later via
+// startAccount/reconnect does NOT require a new QR/pairing scan. The
+// `paused` flag also stops the automatic reconnect-retry loop in
+// connection.update from undoing this the moment WhatsApp's own socket
+// close event fires.
+async function pauseAccount(id) {
+  const runtime = liveAccounts.get(id);
+  if (!runtime) return { ok: false, error: "Account not found." };
+  runtime.paused = true;
+  if (runtime.sock) {
+    try {
+      runtime.sock.ev.removeAllListeners();
+      runtime.sock.end(undefined);
+    } catch (err) {
+      // ignore — socket may already be dead
+    }
+    runtime.sock = null;
+  }
+  runtime.status = "paused";
+  runtime.qr = null;
+  runtime.pairingCode = null;
+  runtime.lastError = "Paused until the plan is renewed.";
+  await setAccountStatus(id, "paused");
+  return { ok: true };
+}
+
 async function refreshGroups(id) {
   const runtime = liveAccounts.get(id);
   if (!runtime?.sock) return;
@@ -153,6 +180,7 @@ async function startAccount(id, phoneNumber, isRetry = false) {
   runtime.lastError = null;
   runtime.qr = null;
   runtime.pairingCode = null;
+  runtime.paused = false;
   if (!isRetry) runtime.reconnectAttempts = 0;
 
   const { state, saveCreds } = await useDBAuthState(id);
@@ -204,6 +232,11 @@ async function startAccount(id, phoneNumber, isRetry = false) {
     }
 
     if (connection === "close") {
+      if (runtime.paused) {
+        // Explicitly paused (e.g. plan expired) — don't auto-retry. Whoever
+        // paused it is responsible for calling startAccount to resume.
+        return;
+      }
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const errorMsg = lastDisconnect?.error?.message || "unknown error";
 
@@ -419,15 +452,16 @@ async function resumeAccountsFromDB() {
   for (const row of rows) {
     liveAccounts.set(row.id, {
       label: row.label,
-      status: row.status === "disconnected" ? "disconnected" : "connecting",
+      status: row.status === "disconnected" || row.status === "paused" ? row.status : "connecting",
       qr: null,
       pairingCode: null,
       phoneNumber: row.phone_number,
       groups: new Map(),
       pinnedWelcome: new Map(),
-      reconnectAttempts: 0
+      reconnectAttempts: 0,
+      paused: row.status === "paused"
     });
-    if (row.status !== "disconnected") {
+    if (row.status !== "disconnected" && row.status !== "paused") {
       startAccount(row.id, row.phone_number).catch((err) =>
         console.error(`Failed to resume account ${row.id}:`, err.message)
       );
@@ -439,6 +473,7 @@ module.exports = {
   listAccounts,
   createAccount,
   startAccount,
+  pauseAccount,
   getAccountRuntime,
   refreshGroups,
   resumeAccountsFromDB,

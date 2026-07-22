@@ -31,5 +31,12 @@ module.exports = {
   // Dashboard login (protects the whole web dashboard, including QR/pairing codes).
   // Set ADMIN_PASSWORD in Railway's Variables tab. Dashboard is disabled until it's set.
   ADMIN_USERNAME: process.env.ADMIN_USERNAME || "admin",
-  ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || ""
+  ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || "",
+
+  // Server-to-server auth for the JSON API (used by an external app calling
+  // in via HTTP, e.g. "x-api-key: <this value>" header) — separate from the
+  // human dashboard's ADMIN_USERNAME/ADMIN_PASSWORD above. Set WABOT_API_KEY
+  // in Railway's Variables tab. If unset, the API-key path is disabled and
+  // only the dashboard's Basic Auth login works.
+  WABOT_API_KEY: process.env.WABOT_API_KEY || ""
 };
