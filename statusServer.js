@@ -57,7 +57,8 @@ function serializeAccount(a, runtime) {
     hasQr: Boolean(runtime?.qr),
     pairingCode: runtime?.pairingCode || null,
     groupCount: groups.length,
-    groups
+    groups,
+    watermark: runtime?.watermark !== false
   };
 }
 
@@ -80,14 +81,23 @@ function startServer(port) {
   });
 
   app.post("/api/accounts", async (req, res) => {
-    const { label, method, phone_number } = req.body || {};
-    const id = await accountManager.createAccount(label);
+    const { label, method, phone_number, watermark } = req.body || {};
+    const id = await accountManager.createAccount(label, watermark !== false);
     const phoneNumber = method === "pairing" ? String(phone_number || "").replace(/\D/g, "") : null;
     if (method === "pairing" && !phoneNumber) {
       return res.status(400).json({ error: "Phone number is required for pairing code login." });
     }
     accountManager.startAccount(id, phoneNumber).catch((err) => console.error("startAccount error:", err.message));
     res.json({ id });
+  });
+
+  // Flips the watermark on/off for an existing account — called by an
+  // external billing layer whenever the owner's premium status changes.
+  app.post("/api/accounts/:id/watermark", async (req, res) => {
+    const { watermark } = req.body || {};
+    const result = await accountManager.setWatermark(req.params.id, watermark);
+    if (!result.ok) return res.status(404).json(result);
+    res.json(result);
   });
 
   app.delete("/api/accounts/:id", async (req, res) => {
@@ -138,16 +148,42 @@ function startServer(port) {
 
   app.post("/api/accounts/:id/groups/:groupId/settings", async (req, res) => {
     const { id, groupId } = req.params;
-    const { welcome_message, warning_message, kick_message, max_warnings, banned_words, block_status_mentions } = req.body || {};
-    await settingsStore.updateSettings(id, groupId, {
-      welcome_message,
-      warning_message,
-      kick_message,
-      max_warnings: String(parseInt(max_warnings, 10) || 3),
-      banned_words,
-      block_status_mentions: block_status_mentions === "1" ? "1" : "0"
-    });
-    res.json({ ok: true });
+    const body = req.body || {};
+
+    // The quick on/off toggle in the dashboard only sends `{ enabled }` —
+    // it doesn't include the other fields (welcome_message, banned_words,
+    // etc). Those come back `undefined` here. Previously we passed them
+    // straight through to settingsStore.updateSettings(), which ran a MySQL
+    // write per key — and mysql2 THROWS on an `undefined` bind param. That
+    // throw was unhandled (no try/catch here), which crashes the whole
+    // wa-main process on Node's unhandled-rejection behavior. Railway then
+    // restarts the service, and if DATABASE_URL isn't set the in-memory
+    // settings store resets to defaults — which is why a disabled group
+    // would look "enabled" again after a reload.
+    //
+    // Fix: only include fields that were actually present in this request,
+    // and only touch DB rows for keys that were sent — a partial toggle
+    // payload should never wipe or crash on the fields it didn't include.
+    const updates = {};
+    if ("enabled" in body) updates.enabled = body.enabled === "0" ? "0" : "1";
+    if ("welcome_message" in body) updates.welcome_message = body.welcome_message;
+    if ("warning_message" in body) updates.warning_message = body.warning_message;
+    if ("kick_message" in body) updates.kick_message = body.kick_message;
+    if ("max_warnings" in body) updates.max_warnings = String(parseInt(body.max_warnings, 10) || 3);
+    if ("banned_words" in body) updates.banned_words = body.banned_words;
+    if ("allowed_urls" in body) updates.allowed_urls = body.allowed_urls || "";
+    if ("ban_links" in body) updates.ban_links = body.ban_links === "0" ? "0" : "1";
+    if ("ban_stickers" in body) updates.ban_stickers = body.ban_stickers === "1" ? "1" : "0";
+    if ("ban_status_mentions" in body) updates.ban_status_mentions = body.ban_status_mentions === "1" ? "1" : "0";
+    if ("respect_admins" in body) updates.respect_admins = body.respect_admins === "0" ? "0" : "1";
+
+    try {
+      await settingsStore.updateSettings(id, groupId, updates);
+      res.json({ ok: true });
+    } catch (err) {
+      console.error(`[${id}] failed to update group settings:`, err.message);
+      res.status(500).json({ error: "Failed to save group settings." });
+    }
   });
 
   app.get("/api/accounts/:id/groups/:groupId/auto-replies", async (req, res) => {

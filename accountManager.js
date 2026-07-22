@@ -311,21 +311,25 @@ async function startAccount(id, phoneNumber, isRetry = false) {
   sock.ev.on("groups.update", () => refreshGroups(id));
 
   sock.ev.on("group-participants.update", async (event) => {
-    const { id: groupId, participants, action } = event;
-    if (action === "add") {
-      const settings = await settingsStore.getSettings(id, groupId);
-      if (settings.enabled === "0") return;
-      for (const userId of participants) {
-        const text = withWatermark(fillTemplate(settings.welcome_message, { user: userId }), runtime);
-        let sent;
-        try {
-          sent = await sock.sendMessage(groupId, { text, mentions: [userId] });
-        } catch (err) {
-          console.error(`[${id}] failed to send welcome message:`, err.message);
-          continue;
+    try {
+      const { id: groupId, participants, action } = event;
+      if (action === "add") {
+        const settings = await settingsStore.getSettings(id, groupId);
+        if (settings.enabled === "0") return;
+        for (const userId of participants) {
+          const text = withWatermark(fillTemplate(settings.welcome_message || "", { user: userId }), runtime);
+          let sent;
+          try {
+            sent = await sock.sendMessage(groupId, { text, mentions: [userId] });
+          } catch (err) {
+            console.error(`[${id}] failed to send welcome message:`, err.message);
+            continue;
+          }
+          await pinWelcomeMessage(groupId, sent);
         }
-        await pinWelcomeMessage(groupId, sent);
       }
+    } catch (err) {
+      console.error(`[${id}] group-participants.update handler failed:`, err.message);
     }
   });
 
@@ -410,7 +414,12 @@ async function startAccount(id, phoneNumber, isRetry = false) {
 
       if (settings.respect_admins !== "0" && (await isGroupAdmin(groupId, senderId))) continue;
 
-      const bannedWords = settings.banned_words.split("\n").map((w) => w.trim()).filter(Boolean);
+      // Defensive: a bad/partial settings write can still leave a stored
+      // value as SQL NULL for an old row. That should never be able to
+      // crash the whole process (it did — repeatedly, see the previous
+      // undefined-payload bug) — fall back to sane defaults instead.
+      try {
+      const bannedWords = (settings.banned_words || "").split("\n").map((w) => w.trim()).filter(Boolean);
       const maxWarnings = parseInt(settings.max_warnings, 10) || 3;
       const allowedUrls = (settings.allowed_urls || "").split("\n").map((u) => u.trim()).filter(Boolean);
 
@@ -429,11 +438,11 @@ async function startAccount(id, phoneNumber, isRetry = false) {
       }
 
       const count = await warningStore.increment(id, groupId, senderId);
-      const warnText = withWatermark(fillTemplate(settings.warning_message, { user: senderId, count, max: maxWarnings }), runtime);
+      const warnText = withWatermark(fillTemplate(settings.warning_message || "", { user: senderId, count, max: maxWarnings }), runtime);
       await sock.sendMessage(groupId, { text: warnText, mentions: [senderId] });
 
       if (count >= maxWarnings) {
-        const kickText = withWatermark(fillTemplate(settings.kick_message, { user: senderId, max: maxWarnings }), runtime);
+        const kickText = withWatermark(fillTemplate(settings.kick_message || "", { user: senderId, max: maxWarnings }), runtime);
         await sock.sendMessage(groupId, { text: kickText, mentions: [senderId] });
 
         try {
@@ -443,6 +452,9 @@ async function startAccount(id, phoneNumber, isRetry = false) {
         }
 
         await warningStore.reset(id, groupId, senderId);
+      }
+      } catch (err) {
+        console.error(`[${id}] moderation check failed for group ${groupId}:`, err.message);
       }
     }
   });

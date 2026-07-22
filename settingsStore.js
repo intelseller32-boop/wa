@@ -35,15 +35,24 @@ async function getSettings(accountId, groupId) {
     "SELECT setting_key, setting_value FROM settings WHERE account_id = ? AND group_id = '_default'",
     [accountId]
   );
+  // A prior bug could write SQL NULL for a setting (partial-update payloads
+  // that included an explicit `undefined` field). If we blindly overwrite
+  // the default with that NULL, callers like accountManager.js crash trying
+  // to call .split() on it. Treat a stored NULL as "no override" so the
+  // default takes effect.
   const settings = { ...DEFAULT_SETTINGS };
-  for (const row of defaultRows) settings[row.setting_key] = row.setting_value;
+  for (const row of defaultRows) {
+    if (row.setting_value !== null) settings[row.setting_key] = row.setting_value;
+  }
 
   if (groupId !== "_default") {
     const [groupRows] = await pool.query(
       "SELECT setting_key, setting_value FROM settings WHERE account_id = ? AND group_id = ?",
       [accountId, groupId]
     );
-    for (const row of groupRows) settings[row.setting_key] = row.setting_value;
+    for (const row of groupRows) {
+      if (row.setting_value !== null) settings[row.setting_key] = row.setting_value;
+    }
   }
 
   return settings;
