@@ -366,6 +366,12 @@ async function renderGroupSettings(accountId, groupId) {
     <div class="topbar"><h1>${escapeHtml(data.groupName)}</h1></div>
 
     <form id="settings-form" style="margin-top:22px">
+      <label>Bot status in this group</label>
+      <select name="enabled">
+        <option value="1" ${s.enabled !== "0" ? "selected" : ""}>Enabled — welcome, moderation & auto-reply are active</option>
+        <option value="0" ${s.enabled === "0" ? "selected" : ""}>Disabled — bot stays in the group but does nothing</option>
+      </select>
+
       <label>Welcome message (use {user} for the mention)</label>
       <textarea name="welcome_message" rows="3">${escapeHtml(s.welcome_message)}</textarea>
 
@@ -381,9 +387,27 @@ async function renderGroupSettings(accountId, groupId) {
       <label>Banned words (one per line)</label>
       <textarea name="banned_words" rows="8">${escapeHtml(s.banned_words)}</textarea>
 
+      <label style="margin-top:14px">Always-allowed links (one per line — exempt even when link banning is on)</label>
+      <textarea name="allowed_urls" rows="2" placeholder="e.g. yourdomain.com">${escapeHtml(s.allowed_urls || "")}</textarea>
+
       <label class="checkbox-row" style="display:flex;align-items:center;gap:8px;margin-top:14px">
-        <input type="checkbox" name="block_status_mentions" ${s.block_status_mentions === "1" ? "checked" : ""} />
+        <input type="checkbox" name="ban_links" ${s.ban_links !== "0" ? "checked" : ""} />
+        <span>Ban links in messages</span>
+      </label>
+
+      <label class="checkbox-row" style="display:flex;align-items:center;gap:8px;margin-top:8px">
+        <input type="checkbox" name="ban_stickers" ${s.ban_stickers === "1" ? "checked" : ""} />
+        <span>Ban stickers</span>
+      </label>
+
+      <label class="checkbox-row" style="display:flex;align-items:center;gap:8px;margin-top:8px">
+        <input type="checkbox" name="ban_status_mentions" ${s.ban_status_mentions === "1" ? "checked" : ""} />
         <span>Treat status mentions as banned content (delete + warn if someone tags this group in their WhatsApp status)</span>
+      </label>
+
+      <label class="checkbox-row" style="display:flex;align-items:center;gap:8px;margin-top:8px">
+        <input type="checkbox" name="respect_admins" ${s.respect_admins !== "0" ? "checked" : ""} />
+        <span>Respect group admins (never warn or kick them)</span>
       </label>
 
       <button type="submit" class="full" style="margin-top:20px">Save Settings</button>
@@ -419,7 +443,10 @@ async function renderGroupSettings(accountId, groupId) {
     e.preventDefault();
     const fd = new FormData(e.target);
     const body = Object.fromEntries(fd.entries());
-    body.block_status_mentions = e.target.querySelector("[name=block_status_mentions]").checked ? "1" : "0";
+    ["ban_links", "ban_stickers", "ban_status_mentions", "respect_admins"].forEach((field) => {
+      const el = e.target.querySelector(`[name="${field}"]`);
+      if (el) body[field] = el.checked ? "1" : "0";
+    });
     const btn = e.target.querySelector("button[type=submit]");
     btn.disabled = true;
     btn.textContent = "Saving…";
