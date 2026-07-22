@@ -2,12 +2,17 @@ const { getPool, isConfigured } = require("./db");
 const defaults = require("./config");
 
 const DEFAULT_SETTINGS = {
+  enabled: "1",
   welcome_message: defaults.WELCOME_MESSAGE,
   warning_message: defaults.WARNING_MESSAGE,
   kick_message: defaults.KICK_MESSAGE,
   max_warnings: String(defaults.MAX_WARNINGS),
   banned_words: defaults.BANNED_WORDS.join("\n"),
-  block_status_mentions: defaults.BLOCK_STATUS_MENTIONS
+  allowed_urls: "",
+  ban_links: "1",
+  ban_stickers: "0",
+  ban_status_mentions: defaults.BAN_STATUS_MENTIONS,
+  respect_admins: "1"
 };
 
 const memoryStore = {}; // `${accountId}:${groupId}` -> partial settings object

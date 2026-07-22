@@ -30,9 +30,16 @@ async function initDb() {
       label VARCHAR(128),
       phone_number VARCHAR(32),
       status VARCHAR(32) DEFAULT 'pending',
+      watermark TINYINT(1) NOT NULL DEFAULT 1 COMMENT 'If 1, append the "Bot powered by" watermark to outgoing messages',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  const [wmCol] = await p.query(
+    `SELECT COUNT(*) AS n FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts' AND COLUMN_NAME = 'watermark'`
+  );
+  if (Number(wmCol[0].n) === 0) {
+    await p.query(`ALTER TABLE accounts ADD COLUMN watermark TINYINT(1) NOT NULL DEFAULT 1`);
+  }
 
   // WhatsApp login session data (replaces the old file-based auth_info folder)
   await p.query(`

@@ -43,13 +43,14 @@ function containsBannedWord(text, bannedWords) {
   return bannedWords.some((w) => w && lower.includes(w.toLowerCase()));
 }
 
-function containsLink(text) {
+function containsLink(text, extraAllowedDomains = []) {
   if (!text) return false;
   const matches = text.match(new RegExp(LINK_REGEX.source, "gi"));
   if (!matches) return false;
+  const allDomains = [...WHITELISTED_LINK_DOMAINS, ...extraAllowedDomains];
   // Only a violation if at least one link isn't on the whitelist.
   return matches.some(
-    (link) => !WHITELISTED_LINK_DOMAINS.some((domain) => link.toLowerCase().includes(domain.toLowerCase()))
+    (link) => !allDomains.some((domain) => domain && link.toLowerCase().includes(domain.toLowerCase()))
   );
 }
 
@@ -74,6 +75,17 @@ function fillTemplate(template, { user, count, max }) {
     .replace("{user}", user ? `@${user.split("@")[0]}` : "")
     .replace("{count}", count ?? "")
     .replace("{max}", max ?? "");
+}
+
+const WATERMARK_TEXT = "\n\n_Bot powered by intelseller.com_";
+
+// Appends the "powered by" watermark to outgoing group messages for
+// non-premium accounts. Whether an account carries the watermark is set by
+// whatever billing layer owns it (e.g. a marketplace app calling the API)
+// via the `watermark` field on create/update — this project has no concept
+// of "premium" on its own.
+function withWatermark(text, runtime) {
+  return runtime?.watermark === false ? text : `${text}${WATERMARK_TEXT}`;
 }
 
 // The in-memory liveAccounts map is the source of truth once the server is
@@ -101,12 +113,12 @@ function getAccountRuntime(id) {
   return liveAccounts.get(id);
 }
 
-async function createAccount(label) {
+async function createAccount(label, watermark = true) {
   const id = crypto.randomUUID();
   if (isConfigured()) {
     await getPool().query(
-      "INSERT INTO accounts (id, label, status) VALUES (?, ?, 'connecting')",
-      [id, label || "WhatsApp Account"]
+      "INSERT INTO accounts (id, label, status, watermark) VALUES (?, ?, 'connecting', ?)",
+      [id, label || "WhatsApp Account", watermark ? 1 : 0]
     );
   }
   liveAccounts.set(id, {
@@ -117,9 +129,23 @@ async function createAccount(label) {
     phoneNumber: null,
     groups: new Map(),
     pinnedWelcome: new Map(),
-    reconnectAttempts: 0
+    reconnectAttempts: 0,
+    watermark: watermark !== false
   });
   return id;
+}
+
+// Called whenever the owning billing layer's premium status changes (e.g. a
+// marketplace app polling premium status). Takes effect on the very next
+// message — no reconnect needed.
+async function setWatermark(id, watermark) {
+  const runtime = liveAccounts.get(id);
+  if (!runtime) return { ok: false, error: "Account not found." };
+  runtime.watermark = watermark !== false;
+  if (isConfigured()) {
+    await getPool().query("UPDATE accounts SET watermark = ? WHERE id = ?", [runtime.watermark ? 1 : 0, id]);
+  }
+  return { ok: true, watermark: runtime.watermark };
 }
 
 // Stops the live connection WITHOUT deleting its saved session — used when
@@ -171,7 +197,8 @@ async function startAccount(id, phoneNumber, isRetry = false) {
       phoneNumber,
       groups: new Map(),
       pinnedWelcome: new Map(),
-      reconnectAttempts: 0
+      reconnectAttempts: 0,
+      watermark: true
     };
     liveAccounts.set(id, runtime);
   }
@@ -287,8 +314,9 @@ async function startAccount(id, phoneNumber, isRetry = false) {
     const { id: groupId, participants, action } = event;
     if (action === "add") {
       const settings = await settingsStore.getSettings(id, groupId);
+      if (settings.enabled === "0") return;
       for (const userId of participants) {
-        const text = fillTemplate(settings.welcome_message, { user: userId });
+        const text = withWatermark(fillTemplate(settings.welcome_message, { user: userId }), runtime);
         let sent;
         try {
           sent = await sock.sendMessage(groupId, { text, mentions: [userId] });
@@ -363,29 +391,34 @@ async function startAccount(id, phoneNumber, isRetry = false) {
         msg.message.imageMessage?.caption ||
         msg.message.videoMessage?.caption ||
         "";
+      const isSticker = Boolean(msg.message.stickerMessage);
+
+      const settings = await settingsStore.getSettings(id, groupId);
+      if (settings.enabled === "0") continue;
 
       // Auto-reply runs for everyone, admins included - it's not a moderation action.
       try {
         const rules = await autoReplyStore.getMatchingRules(id, groupId);
         const match = autoReplyStore.findMatch(rules, text);
         if (match) {
-          const replyText = fillTemplate(match.reply_text, { user: senderId });
+          const replyText = withWatermark(fillTemplate(match.reply_text, { user: senderId }), runtime);
           await sock.sendMessage(groupId, { text: replyText, mentions: [senderId] });
         }
       } catch (err) {
         console.error(`[${id}] auto-reply failed:`, err.message);
       }
 
-      if (await isGroupAdmin(groupId, senderId)) continue;
+      if (settings.respect_admins !== "0" && (await isGroupAdmin(groupId, senderId))) continue;
 
-      const settings = await settingsStore.getSettings(id, groupId);
       const bannedWords = settings.banned_words.split("\n").map((w) => w.trim()).filter(Boolean);
       const maxWarnings = parseInt(settings.max_warnings, 10) || 3;
+      const allowedUrls = (settings.allowed_urls || "").split("\n").map((u) => u.trim()).filter(Boolean);
 
-      const violatesLink = containsLink(text);
+      const violatesLink = settings.ban_links !== "0" && containsLink(text, allowedUrls);
       const violatesWord = containsBannedWord(text, bannedWords);
-      const violatesStatusMention = settings.block_status_mentions === "1" && isGroupStatusMention(msg);
-      if (!violatesLink && !violatesWord && !violatesStatusMention) continue;
+      const violatesSticker = settings.ban_stickers === "1" && isSticker;
+      const violatesStatusMention = settings.ban_status_mentions === "1" && isGroupStatusMention(msg);
+      if (!violatesLink && !violatesWord && !violatesSticker && !violatesStatusMention) continue;
 
       try {
         await sock.sendMessage(groupId, {
@@ -396,11 +429,11 @@ async function startAccount(id, phoneNumber, isRetry = false) {
       }
 
       const count = await warningStore.increment(id, groupId, senderId);
-      const warnText = fillTemplate(settings.warning_message, { user: senderId, count, max: maxWarnings });
+      const warnText = withWatermark(fillTemplate(settings.warning_message, { user: senderId, count, max: maxWarnings }), runtime);
       await sock.sendMessage(groupId, { text: warnText, mentions: [senderId] });
 
       if (count >= maxWarnings) {
-        const kickText = fillTemplate(settings.kick_message, { user: senderId, max: maxWarnings });
+        const kickText = withWatermark(fillTemplate(settings.kick_message, { user: senderId, max: maxWarnings }), runtime);
         await sock.sendMessage(groupId, { text: kickText, mentions: [senderId] });
 
         try {
@@ -448,7 +481,7 @@ async function deleteAccount(id) {
 async function resumeAccountsFromDB() {
   if (!isConfigured()) return;
   const pool = getPool();
-  const [rows] = await pool.query("SELECT id, label, phone_number, status FROM accounts");
+  const [rows] = await pool.query("SELECT id, label, phone_number, status, watermark FROM accounts");
   for (const row of rows) {
     liveAccounts.set(row.id, {
       label: row.label,
@@ -459,7 +492,8 @@ async function resumeAccountsFromDB() {
       groups: new Map(),
       pinnedWelcome: new Map(),
       reconnectAttempts: 0,
-      paused: row.status === "paused"
+      paused: row.status === "paused",
+      watermark: row.watermark !== 0
     });
     if (row.status !== "disconnected" && row.status !== "paused") {
       startAccount(row.id, row.phone_number).catch((err) =>
@@ -474,6 +508,7 @@ module.exports = {
   createAccount,
   startAccount,
   pauseAccount,
+  setWatermark,
   getAccountRuntime,
   refreshGroups,
   resumeAccountsFromDB,

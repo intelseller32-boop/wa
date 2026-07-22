@@ -26,7 +26,7 @@ module.exports = {
 
   // Whether tagging this group in a WhatsApp status counts as a violation
   // (deleted + warned like banned words/links). Off by default. "1" = on, "0" = off.
-  BLOCK_STATUS_MENTIONS: "0",
+  BAN_STATUS_MENTIONS: "0",
 
   // Dashboard login (protects the whole web dashboard, including QR/pairing codes).
   // Set ADMIN_PASSWORD in Railway's Variables tab. Dashboard is disabled until it's set.
