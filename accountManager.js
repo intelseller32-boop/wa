@@ -19,7 +19,7 @@ const dmGreetingStore = require("./dmGreetingStore");
 const { LINK_REGEX, WHITELISTED_LINK_DOMAINS } = require("./config");
 
 const logger = P({ level: "silent" });
-const MAX_RECONNECT_ATTEMPTS = 2;
+const MAX_RECONNECT_ATTEMPTS = 6;
 const STALL_TIMEOUT_MS = 25000; // if nothing happens within this long, stop spinning and show an error
 
 // accountId -> { label, status, qr, pairingCode, groups: Map(id->name), sock, reconnectAttempts, lastError }
@@ -280,21 +280,35 @@ async function startAccount(id, phoneNumber, isRetry = false) {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const errorMsg = lastDisconnect?.error?.message || "unknown error";
 
-      const fatalReasons = [
-        DisconnectReason.loggedOut,
-        DisconnectReason.badSession,
-        DisconnectReason.connectionReplaced,
-        DisconnectReason.multideviceMismatch
-      ];
+      // Only an actual logout (the user removed/unlinked the device from
+      // their phone, or WhatsApp invalidated the session server-side) should
+      // ever force a full disconnect requiring a new QR/pairing scan. Every
+      // other close reason — including badSession (500) and
+      // multideviceMismatch, which are frequently just a transient
+      // stream/signal-session hiccup (e.g. a "Bad MAC" burst on a @lid
+      // session forcing WhatsApp to close the socket, or momentary network
+      // trouble) rather than a real logout — should fall through to the
+      // normal retry-with-backoff path below. Treating those as fatal was
+      // the cause of accounts getting force-disconnected on their own
+      // without anyone actually logging out.
+      const fatalReasons = [DisconnectReason.loggedOut];
 
       if (fatalReasons.includes(statusCode)) {
         console.error(`[${id}] fatal disconnect (${statusCode}): ${errorMsg}`);
         runtime.status = "disconnected";
-        runtime.lastError = statusCode === DisconnectReason.loggedOut
-          ? "This device was logged out from WhatsApp. Remove it and add it again to relink."
-          : `Connection closed: ${errorMsg}`;
+        runtime.lastError = "This device was logged out from WhatsApp. Remove it and add it again to relink.";
         await setAccountStatus(id, "disconnected");
         return;
+      }
+
+      if (statusCode === DisconnectReason.connectionReplaced || statusCode === DisconnectReason.multideviceMismatch) {
+        // Not a manual logout, but also not something blindly retrying will
+        // usually fix on its own (another device is holding the session, or
+        // the device list is out of sync). Log it distinctly for
+        // visibility, but still go through the normal retry path below
+        // instead of forcing "disconnected" — the session/creds are left
+        // intact, so if it does resolve itself no re-scan is needed.
+        console.warn(`[${id}] disconnect needs attention (${statusCode}): ${errorMsg} — will still retry, no re-scan required.`);
       }
 
       runtime.reconnectAttempts = (runtime.reconnectAttempts || 0) + 1;
@@ -429,19 +443,51 @@ async function startAccount(id, phoneNumber, isRetry = false) {
     return new Promise((resolve) => setTimeout(resolve, minMs + Math.random() * (maxMs - minMs)));
   }
 
+  // WhatsApp is rolling @lid (Linked ID) addressing out everywhere, and
+  // Baileys' handling of sending TO a raw @lid is still shaky in the 6.x
+  // line (see WhiskeySockets/Baileys #1539, #2079) — sendMessage can resolve
+  // successfully with no thrown error while the message never actually
+  // reaches the other side. If Baileys has already learned the real
+  // phone-number JID behind this @lid (it does once the socket has
+  // exchanged enough traffic with them), prefer sending to that instead —
+  // it uses the normal, well-tested session path.
+  async function resolvePreferredJid(jid) {
+    if (!jid?.endsWith("@lid")) return jid;
+    try {
+      const pn = await sock.signalRepository?.lidMapping?.getPNForLID?.(jid);
+      if (pn) return pn;
+    } catch (err) {
+      // mapping lookup is best-effort — fall back to the raw @lid below
+    }
+    return jid;
+  }
+
   // Shows a brief "typing…" presence before sending — cheap anti-ban
   // hygiene. An instant, zero-delay reply to every message is one of the
   // clearer "this is a bot" signals WhatsApp's behavioral detection looks
   // for; a short human-like pause costs nothing and reduces that signal.
   async function sendHumanlike(jid, content) {
+    const sendJid = await resolvePreferredJid(jid);
+    if (sendJid !== jid) {
+      console.log(`[${id}] resolved ${jid} -> ${sendJid} for sending`);
+    }
     try {
-      await sock.sendPresenceUpdate("composing", jid);
+      await sock.sendPresenceUpdate("composing", sendJid);
       await randomDelay(700, 2200);
-      await sock.sendPresenceUpdate("paused", jid);
+      await sock.sendPresenceUpdate("paused", sendJid);
     } catch (err) {
       // presence updates are best-effort — never block the actual reply on this
     }
-    return sock.sendMessage(jid, content);
+    // Don't let a send failure disappear into an unhandled rejection deep in
+    // a fire-and-forget call chain — log it explicitly here, in addition to
+    // whatever the caller's own catch does, so a delivery failure is always
+    // visible in the logs rather than looking like nothing happened.
+    try {
+      return await sock.sendMessage(sendJid, content);
+    } catch (err) {
+      console.error(`[${id}] sendMessage to ${sendJid} (orig ${jid}) failed:`, err.stack || err.message);
+      throw err;
+    }
   }
 
   // Personal-chat (1:1 DM) auto-reply + first-message greeting. Deliberately
