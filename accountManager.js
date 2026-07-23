@@ -427,6 +427,10 @@ async function startAccount(id, phoneNumber, isRetry = false) {
       msg.message.videoMessage?.caption ||
       "";
 
+    console.log(
+      `[${id}] DM in from ${contactJid} (pushName="${msg.pushName || ""}"): "${text.slice(0, 120)}"`
+    );
+
     try {
       const greetingSettings = await dmGreetingStore.getSettings(id);
       const customVars = await dmVariableStore.listVariables(id);
@@ -437,43 +441,72 @@ async function startAccount(id, phoneNumber, isRetry = false) {
       // dmVariableStore already blocks reserved names at save-time too.
       const vars = { user: contactJid, name: senderName, number: contactJid.split("@")[0], ...customVars };
 
+      console.log(
+        `[${id}] DM greeting settings: enabled=${greetingSettings.enabled} hasMessage=${Boolean(greetingSettings.message)}`
+      );
+
       if (greetingSettings.enabled && greetingSettings.message) {
         const shouldGreet = await dmGreetingStore.shouldGreetAndMark(id, contactJid, greetingSettings.resetAfterDays);
+        console.log(`[${id}] DM shouldGreet(${contactJid}) = ${shouldGreet}`);
         if (shouldGreet) {
           const greetingText = withWatermark(fillTemplate(greetingSettings.message, vars), runtime);
           await sendHumanlike(contactJid, { text: greetingText });
+          console.log(`[${id}] DM greeting sent to ${contactJid}`);
           usageStore.increment(id, { messages: 1 }).catch(() => {});
         }
       }
 
       const rules = await dmAutoReplyStore.listAutoReplies(id);
+      console.log(`[${id}] DM auto-reply rules loaded: ${rules.length}`);
       const match = dmAutoReplyStore.findMatch(rules, text);
       if (match) {
+        console.log(`[${id}] DM auto-reply matched rule "${match.keyword}" (${match.match_type})`);
         const replyText = withWatermark(fillTemplate(match.reply_text, vars), runtime);
         await sendHumanlike(contactJid, { text: replyText });
+        console.log(`[${id}] DM auto-reply sent to ${contactJid}`);
         usageStore.increment(id, { messages: 1 }).catch(() => {});
+      } else {
+        console.log(`[${id}] DM auto-reply: no rule matched text "${text.slice(0, 60)}"`);
       }
     } catch (err) {
-      console.error(`[${id}] DM auto-reply failed:`, err.message);
+      console.error(`[${id}] DM auto-reply failed for ${contactJid}:`, err.stack || err.message);
     }
   }
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    console.log(`[${id}] messages.upsert type=${type} count=${messages.length}`);
     if (type !== "notify") return;
 
     for (const msg of messages) {
-      if (!msg.message || msg.key.fromMe) continue;
-
       const remoteJid = msg.key.remoteJid;
 
+      if (!msg.message) {
+        console.log(`[${id}] skip: empty msg.message (remoteJid=${remoteJid}, likely a protocol/reaction/receipt event)`);
+        continue;
+      }
+      if (msg.key.fromMe) {
+        console.log(`[${id}] skip: fromMe (remoteJid=${remoteJid})`);
+        continue;
+      }
+
+      console.log(`[${id}] inbound message remoteJid=${remoteJid} participant=${msg.key.participant || "-"}`);
+
       // 1:1 personal chat — auto-reply/greeting only, never moderation.
-      if (remoteJid?.endsWith("@s.whatsapp.net")) {
-        handleDirectMessage(msg).catch((err) => console.error(`[${id}] handleDirectMessage error:`, err.message));
+      // NOTE: WhatsApp has been rolling out "LID" (Linked ID) identifiers,
+      // so a real 1:1 DM can arrive with remoteJid ending in "@lid" instead
+      // of the classic "@s.whatsapp.net" — Baileys issue #1718/#1714/#1872.
+      // Treating only "@s.whatsapp.net" as a DM silently drops those chats
+      // (they don't match "@g.us" either, so they fall through unlogged).
+      if (remoteJid?.endsWith("@s.whatsapp.net") || remoteJid?.endsWith("@lid")) {
+        handleDirectMessage(msg).catch((err) => console.error(`[${id}] handleDirectMessage error:`, err.stack || err.message));
         continue;
       }
 
       const groupId = remoteJid;
-      if (!groupId?.endsWith("@g.us")) continue; // never engage statuses, broadcasts, newsletters, etc.
+      if (!groupId?.endsWith("@g.us")) {
+        console.log(`[${id}] skip: remoteJid ${remoteJid} is neither a DM nor a group (status/broadcast/newsletter/bot)`);
+        continue; // never engage statuses, broadcasts, newsletters, etc.
+      }
 
       const senderId = msg.key.participant || msg.key.remoteJid;
 
