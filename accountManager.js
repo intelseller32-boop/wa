@@ -12,6 +12,9 @@ const settingsStore = require("./settingsStore");
 const warningStore = require("./warningStore");
 const autoReplyStore = require("./autoReplyStore");
 const usageStore = require("./usageStore");
+const dmAutoReplyStore = require("./dmAutoReplyStore");
+const dmVariableStore = require("./dmVariableStore");
+const dmGreetingStore = require("./dmGreetingStore");
 const { LINK_REGEX, WHITELISTED_LINK_DOMAINS } = require("./config");
 
 const logger = P({ level: "silent" });
@@ -71,11 +74,19 @@ function isGroupStatusMention(msg) {
   );
 }
 
-function fillTemplate(template, { user, count, max }) {
-  return (template || "")
-    .replace("{user}", user ? `@${user.split("@")[0]}` : "")
-    .replace("{count}", count ?? "")
-    .replace("{max}", max ?? "");
+// Replaces every {key} in the template with vars[key], for every key
+// provided — not just the fixed {user}/{count}/{max} set. Uses split/join
+// instead of a RegExp so variable values never need escaping, and so a
+// placeholder can appear more than once in the same template (the old
+// single-.replace() version silently only filled in the first occurrence).
+function fillTemplate(template, vars = {}) {
+  let result = template || "";
+  for (const [key, value] of Object.entries(vars)) {
+    if (value === undefined || value === null) continue;
+    const rendered = key === "user" && value ? `@${String(value).split("@")[0]}` : String(value);
+    result = result.split(`{${key}}`).join(rendered);
+  }
+  return result;
 }
 
 const WATERMARK_TEXT = "\n\n_Bot powered by intelseller.com_";
@@ -380,14 +391,89 @@ async function startAccount(id, phoneNumber, isRetry = false) {
     }
   }
 
+  function randomDelay(minMs, maxMs) {
+    return new Promise((resolve) => setTimeout(resolve, minMs + Math.random() * (maxMs - minMs)));
+  }
+
+  // Shows a brief "typing…" presence before sending — cheap anti-ban
+  // hygiene. An instant, zero-delay reply to every message is one of the
+  // clearer "this is a bot" signals WhatsApp's behavioral detection looks
+  // for; a short human-like pause costs nothing and reduces that signal.
+  async function sendHumanlike(jid, content) {
+    try {
+      await sock.sendPresenceUpdate("composing", jid);
+      await randomDelay(700, 2200);
+      await sock.sendPresenceUpdate("paused", jid);
+    } catch (err) {
+      // presence updates are best-effort — never block the actual reply on this
+    }
+    return sock.sendMessage(jid, content);
+  }
+
+  // Personal-chat (1:1 DM) auto-reply + first-message greeting. Deliberately
+  // REPLY-ONLY: this only ever fires in response to a message the contact
+  // sent first, the same trigger WhatsApp's own official "away message" /
+  // "greeting message" feature uses. It never initiates a conversation with
+  // anyone, and never touches groups, statuses, broadcasts, or newsletters —
+  // see the JID check at the call site below.
+  async function handleDirectMessage(msg) {
+    const contactJid = msg.key.remoteJid;
+    const senderName = msg.pushName || contactJid.split("@")[0];
+
+    const text =
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text ||
+      msg.message.imageMessage?.caption ||
+      msg.message.videoMessage?.caption ||
+      "";
+
+    try {
+      const greetingSettings = await dmGreetingStore.getSettings(id);
+      const customVars = await dmVariableStore.listVariables(id);
+      // {user} keeps the same @mention rendering as groups (harmless in a
+      // DM, just renders as text); {name} is the contact's own WhatsApp
+      // display name; {number} is their raw phone number. Custom variables
+      // are spread in last so they can't be shadowed by the built-ins —
+      // dmVariableStore already blocks reserved names at save-time too.
+      const vars = { user: contactJid, name: senderName, number: contactJid.split("@")[0], ...customVars };
+
+      if (greetingSettings.enabled && greetingSettings.message) {
+        const shouldGreet = await dmGreetingStore.shouldGreetAndMark(id, contactJid, greetingSettings.resetAfterDays);
+        if (shouldGreet) {
+          const greetingText = withWatermark(fillTemplate(greetingSettings.message, vars), runtime);
+          await sendHumanlike(contactJid, { text: greetingText });
+          usageStore.increment(id, { messages: 1 }).catch(() => {});
+        }
+      }
+
+      const rules = await dmAutoReplyStore.listAutoReplies(id);
+      const match = dmAutoReplyStore.findMatch(rules, text);
+      if (match) {
+        const replyText = withWatermark(fillTemplate(match.reply_text, vars), runtime);
+        await sendHumanlike(contactJid, { text: replyText });
+        usageStore.increment(id, { messages: 1 }).catch(() => {});
+      }
+    } catch (err) {
+      console.error(`[${id}] DM auto-reply failed:`, err.message);
+    }
+  }
+
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
 
     for (const msg of messages) {
       if (!msg.message || msg.key.fromMe) continue;
 
-      const groupId = msg.key.remoteJid;
-      if (!groupId?.endsWith("@g.us")) continue;
+      const remoteJid = msg.key.remoteJid;
+
+      // 1:1 personal chat — auto-reply/greeting only, never moderation.
+      if (remoteJid?.endsWith("@s.whatsapp.net")) {
+        handleDirectMessage(msg).catch((err) => console.error(`[${id}] handleDirectMessage error:`, err.message));
+        continue;
+      }
+
+      const groupId = remoteJid;
+      if (!groupId?.endsWith("@g.us")) continue; // never engage statuses, broadcasts, newsletters, etc.
 
       const senderId = msg.key.participant || msg.key.remoteJid;
 

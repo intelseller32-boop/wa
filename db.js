@@ -88,6 +88,54 @@ async function initDb() {
     )
   `);
 
+  // ── Personal chat (1:1 DM) auto-reply — same shape as group auto_replies
+  // but account-scoped only (a personal account has no "groups" to key on).
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS dm_auto_replies (
+      id VARCHAR(36) PRIMARY KEY,
+      account_id VARCHAR(36) NOT NULL,
+      keyword VARCHAR(255) NOT NULL,
+      reply_text TEXT NOT NULL,
+      match_type VARCHAR(16) NOT NULL DEFAULT 'contains',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_account (account_id)
+    )
+  `);
+
+  // Owner-defined custom variables usable in DM templates as {name}.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS dm_variables (
+      account_id VARCHAR(36) NOT NULL,
+      var_name VARCHAR(64) NOT NULL,
+      var_value VARCHAR(512) NOT NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (account_id, var_name)
+    )
+  `);
+
+  // First-message ("greeting") config — mirrors WhatsApp's own official
+  // away/greeting message feature: sent once to a contact, then again only
+  // after reset_after_days of silence from them.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS dm_greeting_settings (
+      account_id VARCHAR(36) PRIMARY KEY,
+      enabled TINYINT(1) NOT NULL DEFAULT 0,
+      message TEXT,
+      reset_after_days INT NOT NULL DEFAULT 3
+    )
+  `);
+
+  // Tracks who's already been greeted and when, per account.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS dm_contacts (
+      account_id VARCHAR(36) NOT NULL,
+      contact_jid VARCHAR(64) NOT NULL,
+      first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      last_greeted_at TIMESTAMP NULL,
+      PRIMARY KEY (account_id, contact_jid)
+    )
+  `);
+
   // Lifetime usage counters per account — messages the bot has sent into
   // groups, and moderation actions taken (delete/kick). These are CUMULATIVE
   // (never reset) — reported_* tracks how much has already been pulled/

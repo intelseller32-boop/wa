@@ -5,6 +5,9 @@ const accountManager = require("./accountManager");
 const settingsStore = require("./settingsStore");
 const usageStore = require("./usageStore");
 const autoReplyStore = require("./autoReplyStore");
+const dmAutoReplyStore = require("./dmAutoReplyStore");
+const dmVariableStore = require("./dmVariableStore");
+const dmGreetingStore = require("./dmGreetingStore");
 const { ADMIN_USERNAME, ADMIN_PASSWORD, WABOT_API_KEY } = require("./config");
 
 function requireAdmin(req, res, next) {
@@ -252,6 +255,84 @@ function startServer(port) {
     const { id, ruleId } = req.params;
     await autoReplyStore.deleteAutoReply(id, ruleId);
     res.json({ ok: true });
+  });
+
+  // ==================== Personal chat (1:1 DM) ====================
+
+  app.get("/api/accounts/:id/dm/auto-replies", async (req, res) => {
+    const rules = await dmAutoReplyStore.listAutoReplies(req.params.id);
+    res.json({ rules });
+  });
+
+  app.post("/api/accounts/:id/dm/auto-replies", async (req, res) => {
+    const { id } = req.params;
+    const { keyword, reply_text, match_type } = req.body || {};
+    if (!keyword || !keyword.trim()) return res.status(400).json({ error: "Keyword is required." });
+    if (!reply_text || !reply_text.trim()) return res.status(400).json({ error: "Reply text is required." });
+    const rule = await dmAutoReplyStore.addAutoReply(
+      id,
+      keyword.trim(),
+      reply_text.trim(),
+      match_type === "exact" ? "exact" : "contains"
+    );
+    res.json({ rule });
+  });
+
+  app.put("/api/accounts/:id/dm/auto-replies/:ruleId", async (req, res) => {
+    const { id, ruleId } = req.params;
+    const { keyword, reply_text, match_type } = req.body || {};
+    if (!keyword || !keyword.trim()) return res.status(400).json({ error: "Keyword is required." });
+    if (!reply_text || !reply_text.trim()) return res.status(400).json({ error: "Reply text is required." });
+    const rule = await dmAutoReplyStore.updateAutoReply(
+      id,
+      ruleId,
+      keyword.trim(),
+      reply_text.trim(),
+      match_type === "exact" ? "exact" : "contains"
+    );
+    if (!rule) return res.status(404).json({ error: "Auto-reply not found." });
+    res.json({ rule });
+  });
+
+  app.delete("/api/accounts/:id/dm/auto-replies/:ruleId", async (req, res) => {
+    await dmAutoReplyStore.deleteAutoReply(req.params.id, req.params.ruleId);
+    res.json({ ok: true });
+  });
+
+  // Custom variables — returned as { variables: [{name, value}] } (array,
+  // not the raw map fillTemplate uses internally) so the dashboard can
+  // render/order them predictably.
+  app.get("/api/accounts/:id/dm/variables", async (req, res) => {
+    const map = await dmVariableStore.listVariables(req.params.id);
+    res.json({ variables: Object.entries(map).map(([name, value]) => ({ name, value })) });
+  });
+
+  app.post("/api/accounts/:id/dm/variables", async (req, res) => {
+    const { name, value } = req.body || {};
+    try {
+      const saved = await dmVariableStore.setVariable(req.params.id, name, value);
+      res.json({ variable: saved });
+    } catch (err) {
+      res.status(400).json({ error: err.message, code: err.code });
+    }
+  });
+
+  app.delete("/api/accounts/:id/dm/variables/:name", async (req, res) => {
+    await dmVariableStore.deleteVariable(req.params.id, req.params.name);
+    res.json({ ok: true });
+  });
+
+  // First-message greeting — sent once per contact (see dmGreetingStore for
+  // the re-greet-after-silence logic).
+  app.get("/api/accounts/:id/dm/greeting", async (req, res) => {
+    const settings = await dmGreetingStore.getSettings(req.params.id);
+    res.json(settings);
+  });
+
+  app.post("/api/accounts/:id/dm/greeting", async (req, res) => {
+    const { enabled, message, resetAfterDays } = req.body || {};
+    const settings = await dmGreetingStore.updateSettings(req.params.id, { enabled, message, resetAfterDays });
+    res.json(settings);
   });
 
   // ---- Single-page dashboard (no more full-page reloads) ----
