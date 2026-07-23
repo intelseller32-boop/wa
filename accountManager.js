@@ -19,7 +19,7 @@ const dmGreetingStore = require("./dmGreetingStore");
 const { LINK_REGEX, WHITELISTED_LINK_DOMAINS } = require("./config");
 
 const logger = P({ level: "silent" });
-const MAX_RECONNECT_ATTEMPTS = 5;
+const MAX_RECONNECT_ATTEMPTS = 2;
 const STALL_TIMEOUT_MS = 25000; // if nothing happens within this long, stop spinning and show an error
 
 // accountId -> { label, status, qr, pairingCode, groups: Map(id->name), sock, reconnectAttempts, lastError }
