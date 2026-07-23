@@ -3,6 +3,7 @@ const express = require("express");
 const QRCode = require("qrcode");
 const accountManager = require("./accountManager");
 const settingsStore = require("./settingsStore");
+const usageStore = require("./usageStore");
 const autoReplyStore = require("./autoReplyStore");
 const { ADMIN_USERNAME, ADMIN_PASSWORD, WABOT_API_KEY } = require("./config");
 
@@ -183,6 +184,30 @@ function startServer(port) {
     } catch (err) {
       console.error(`[${id}] failed to update group settings:`, err.message);
       res.status(500).json({ error: "Failed to save group settings." });
+    }
+  });
+
+  // Read-only, doesn't mark anything as billed — safe to poll for display.
+  app.get("/api/accounts/:id/usage", async (req, res) => {
+    try {
+      const usage = await usageStore.peek(req.params.id);
+      res.json(usage);
+    } catch (err) {
+      console.error(`[${req.params.id}] failed to read usage:`, err.message);
+      res.status(500).json({ error: "Failed to read usage." });
+    }
+  });
+
+  // Returns the unbilled delta AND marks it as billed. This is meant to be
+  // called by wabot's usage-sync job, not the dashboard UI — calling it
+  // twice will only return the new usage the second time.
+  app.post("/api/accounts/:id/usage/pull", async (req, res) => {
+    try {
+      const usage = await usageStore.pull(req.params.id);
+      res.json(usage);
+    } catch (err) {
+      console.error(`[${req.params.id}] failed to pull usage:`, err.message);
+      res.status(500).json({ error: "Failed to pull usage." });
     }
   });
 

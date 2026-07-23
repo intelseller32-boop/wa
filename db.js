@@ -88,6 +88,22 @@ async function initDb() {
     )
   `);
 
+  // Lifetime usage counters per account — messages the bot has sent into
+  // groups, and moderation actions taken (delete/kick). These are CUMULATIVE
+  // (never reset) — reported_* tracks how much has already been pulled/
+  // billed by wabot, so pull() can hand back only the unbilled delta without
+  // needing a fragile reset-to-zero race. See usageStore.js.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS usage_counters (
+      account_id VARCHAR(36) PRIMARY KEY,
+      messages_sent BIGINT NOT NULL DEFAULT 0,
+      actions_count BIGINT NOT NULL DEFAULT 0,
+      reported_messages BIGINT NOT NULL DEFAULT 0,
+      reported_actions BIGINT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )
+  `);
+
   console.log("Connected to MySQL database and verified tables.");
 }
 

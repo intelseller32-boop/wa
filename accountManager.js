@@ -11,6 +11,7 @@ const { getPool, isConfigured } = require("./db");
 const settingsStore = require("./settingsStore");
 const warningStore = require("./warningStore");
 const autoReplyStore = require("./autoReplyStore");
+const usageStore = require("./usageStore");
 const { LINK_REGEX, WHITELISTED_LINK_DOMAINS } = require("./config");
 
 const logger = P({ level: "silent" });
@@ -321,6 +322,7 @@ async function startAccount(id, phoneNumber, isRetry = false) {
           let sent;
           try {
             sent = await sock.sendMessage(groupId, { text, mentions: [userId] });
+            usageStore.increment(id, { messages: 1 }).catch(() => {});
           } catch (err) {
             console.error(`[${id}] failed to send welcome message:`, err.message);
             continue;
@@ -407,6 +409,7 @@ async function startAccount(id, phoneNumber, isRetry = false) {
         if (match) {
           const replyText = withWatermark(fillTemplate(match.reply_text, { user: senderId }), runtime);
           await sock.sendMessage(groupId, { text: replyText, mentions: [senderId] });
+          usageStore.increment(id, { messages: 1 }).catch(() => {});
         }
       } catch (err) {
         console.error(`[${id}] auto-reply failed:`, err.message);
@@ -433,6 +436,7 @@ async function startAccount(id, phoneNumber, isRetry = false) {
         await sock.sendMessage(groupId, {
           delete: { remoteJid: groupId, fromMe: false, id: msg.key.id, participant: senderId }
         });
+        usageStore.increment(id, { actions: 1 }).catch(() => {});
       } catch (err) {
         console.error(`[${id}] failed to delete message:`, err.message);
       }
@@ -440,13 +444,16 @@ async function startAccount(id, phoneNumber, isRetry = false) {
       const count = await warningStore.increment(id, groupId, senderId);
       const warnText = withWatermark(fillTemplate(settings.warning_message || "", { user: senderId, count, max: maxWarnings }), runtime);
       await sock.sendMessage(groupId, { text: warnText, mentions: [senderId] });
+      usageStore.increment(id, { messages: 1 }).catch(() => {});
 
       if (count >= maxWarnings) {
         const kickText = withWatermark(fillTemplate(settings.kick_message || "", { user: senderId, max: maxWarnings }), runtime);
         await sock.sendMessage(groupId, { text: kickText, mentions: [senderId] });
+        usageStore.increment(id, { messages: 1 }).catch(() => {});
 
         try {
           await sock.groupParticipantsUpdate(groupId, [senderId], "remove");
+          usageStore.increment(id, { actions: 1 }).catch(() => {});
         } catch (err) {
           console.error(`[${id}] failed to remove user (bot may not be admin):`, err.message);
         }
@@ -482,6 +489,11 @@ async function deleteAccount(id) {
     await pool.query("DELETE FROM auth_data WHERE account_id = ?", [id]);
     await pool.query("DELETE FROM settings WHERE account_id = ?", [id]);
     await pool.query("DELETE FROM warnings WHERE account_id = ?", [id]);
+    // usage_counters is intentionally NOT deleted here. wabot syncs usage
+    // right before it calls this delete, but leaving the row around is a
+    // safety net — a delete-then-immediate-pull race, or a sync that failed
+    // right before deletion, would otherwise silently lose billable usage
+    // an owner already ran up. The row is tiny and harmless to keep.
   }
 }
 
