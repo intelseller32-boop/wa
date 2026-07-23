@@ -2,7 +2,8 @@ const {
   default: makeWASocket,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  Browsers
+  Browsers,
+  jidNormalizedUser
 } = require("@whiskeysockets/baileys");
 const crypto = require("crypto");
 const P = require("pino");
@@ -391,6 +392,39 @@ async function startAccount(id, phoneNumber, isRetry = false) {
     }
   }
 
+  // Checks whether the bot itself currently has admin rights in a group.
+  // Moderation actions (delete-for-everyone, removing a member) silently
+  // no-op on WhatsApp's side when the bot isn't admin — Baileys doesn't
+  // always throw, so we can't just rely on a catch block to notice.
+  // Reuses the same admin cache/TTL as isGroupAdmin above.
+  async function isBotGroupAdmin(groupId) {
+    if (!sock.user?.id) return false;
+    const botJid = jidNormalizedUser(sock.user.id);
+    return isGroupAdmin(groupId, botJid);
+  }
+
+  // groupId -> last time we posted the "I need admin rights" notice.
+  // Prevents spamming the group once per violating message.
+  const noAdminNoticeAt = new Map();
+  const NO_ADMIN_NOTICE_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+
+  async function notifyMissingAdminRights(groupId, runtime) {
+    const last = noAdminNoticeAt.get(groupId) || 0;
+    if (Date.now() - last < NO_ADMIN_NOTICE_COOLDOWN_MS) return;
+    noAdminNoticeAt.set(groupId, Date.now());
+    try {
+      await sock.sendMessage(groupId, {
+        text: withWatermark(
+          "⚠️ I need admin rights in this group to delete messages and remove members. Please make me an admin so I can enforce the moderation rules.",
+          runtime
+        )
+      });
+      usageStore.increment(id, { messages: 1 }).catch(() => {});
+    } catch (err) {
+      console.error(`[${id}] failed to send missing-admin-rights notice:`, err.message);
+    }
+  }
+
   function randomDelay(minMs, maxMs) {
     return new Promise((resolve) => setTimeout(resolve, minMs + Math.random() * (maxMs - minMs)));
   }
@@ -551,13 +585,31 @@ async function startAccount(id, phoneNumber, isRetry = false) {
       const violatesStatusMention = settings.ban_status_mentions === "1" && isGroupStatusMention(msg);
       if (!violatesLink && !violatesWord && !violatesSticker && !violatesStatusMention) continue;
 
+      // Without admin rights, "delete for everyone" and removing a member
+      // both silently fail on WhatsApp's side (Baileys won't necessarily
+      // throw). Check up front and tell the group why nothing happened,
+      // instead of pretending the message was deleted / warning was enforced.
+      if (!(await isBotGroupAdmin(groupId))) {
+        await notifyMissingAdminRights(groupId, runtime);
+        continue;
+      }
+
+      let deleted = false;
       try {
         await sock.sendMessage(groupId, {
           delete: { remoteJid: groupId, fromMe: false, id: msg.key.id, participant: senderId }
         });
+        deleted = true;
         usageStore.increment(id, { actions: 1 }).catch(() => {});
       } catch (err) {
         console.error(`[${id}] failed to delete message:`, err.message);
+      }
+
+      if (!deleted) {
+        // Admin check passed but the delete call itself still failed
+        // (e.g. rights were revoked in the moment, or a transient error).
+        await notifyMissingAdminRights(groupId, runtime);
+        continue;
       }
 
       const count = await warningStore.increment(id, groupId, senderId);
@@ -575,6 +627,7 @@ async function startAccount(id, phoneNumber, isRetry = false) {
           usageStore.increment(id, { actions: 1 }).catch(() => {});
         } catch (err) {
           console.error(`[${id}] failed to remove user (bot may not be admin):`, err.message);
+          await notifyMissingAdminRights(groupId, runtime);
         }
 
         await warningStore.reset(id, groupId, senderId);
