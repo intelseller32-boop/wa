@@ -237,6 +237,26 @@ async function startAccount(id, phoneNumber, isRetry = false) {
   });
   runtime.sock = sock;
 
+  // messageId -> { jid, origJid, sentAt }. Populated by sendHumanlike() right
+  // after Baileys accepts a send, cleared by the messages.update ack handler
+  // below (or by the sweep) once we know what actually happened to it. This
+  // is what lets the logs distinguish "Baileys accepted it but WhatsApp
+  // never delivered it" from a genuinely successful send.
+  const pendingSends = new Map();
+
+  // Sweep for sends that never got any ack at all within a reasonable
+  // window — a stuck/pending send with zero ack is itself a signal (usually
+  // a dead/desynced session), distinct from an explicit error ack.
+  const pendingSweep = setInterval(() => {
+    const now = Date.now();
+    for (const [msgId, info] of pendingSends.entries()) {
+      if (now - info.sentAt > 20000) {
+        console.error(`[${id}] send to ${info.jid} (orig ${info.origJid}, id=${msgId}) got NO delivery ack within 20s — message likely never reached WhatsApp/the recipient.`);
+        pendingSends.delete(msgId);
+      }
+    }
+  }, 10000);
+
   // Safety net: if WhatsApp never responds at all (no qr/pairing/open/close),
   // don't leave the dashboard spinning on "Connecting..." forever.
   const stallTimer = setTimeout(async () => {
@@ -272,6 +292,7 @@ async function startAccount(id, phoneNumber, isRetry = false) {
     }
 
     if (connection === "close") {
+      clearInterval(pendingSweep);
       if (runtime.paused) {
         // Explicitly paused (e.g. plan expired) — don't auto-retry. Whoever
         // paused it is responsible for calling startAccount to resume.
@@ -455,9 +476,13 @@ async function startAccount(id, phoneNumber, isRetry = false) {
     if (!jid?.endsWith("@lid")) return jid;
     try {
       const pn = await sock.signalRepository?.lidMapping?.getPNForLID?.(jid);
-      if (pn) return pn;
+      if (pn) {
+        console.log(`[${id}] lid-mapping HIT for ${jid} -> ${pn}`);
+        return pn;
+      }
+      console.log(`[${id}] lid-mapping MISS for ${jid} (no phone-number JID known yet) — will send to raw @lid`);
     } catch (err) {
-      // mapping lookup is best-effort — fall back to the raw @lid below
+      console.warn(`[${id}] lid-mapping lookup threw for ${jid}: ${err.message} — will send to raw @lid`);
     }
     return jid;
   }
@@ -483,7 +508,19 @@ async function startAccount(id, phoneNumber, isRetry = false) {
     // whatever the caller's own catch does, so a delivery failure is always
     // visible in the logs rather than looking like nothing happened.
     try {
-      return await sock.sendMessage(sendJid, content);
+      const result = await sock.sendMessage(sendJid, content);
+      const sentId = result?.key?.id;
+      if (!sentId) {
+        // sendMessage resolved without throwing, but returned nothing usable
+        // — this is exactly the silent-no-op case the @lid comment above
+        // warns about. Flag it loudly instead of letting it look identical
+        // to a normal successful send.
+        console.error(`[${id}] sendMessage to ${sendJid} (orig ${jid}) returned no message key — send likely did NOT reach WhatsApp despite no error being thrown.`);
+      } else {
+        console.log(`[${id}] sendMessage to ${sendJid} (orig ${jid}) accepted by Baileys, id=${sentId}. Waiting for delivery ack...`);
+        pendingSends.set(sentId, { jid: sendJid, origJid: jid, sentAt: Date.now() });
+      }
+      return result;
     } catch (err) {
       console.error(`[${id}] sendMessage to ${sendJid} (orig ${jid}) failed:`, err.stack || err.message);
       throw err;
@@ -552,6 +589,29 @@ async function startAccount(id, phoneNumber, isRetry = false) {
       console.error(`[${id}] DM auto-reply failed for ${contactJid}:`, err.stack || err.message);
     }
   }
+
+  // Baileys reports what happened to a sent message (server-ack, delivered,
+  // read, or an error) via messages.update, keyed by the same message id
+  // sendMessage() returned. This is the other half of the pendingSends
+  // tracking above — it's what actually confirms (or disproves) delivery,
+  // instead of trusting that "sendMessage didn't throw" means "it arrived".
+  sock.ev.on("messages.update", (updates) => {
+    for (const u of updates) {
+      const msgId = u.key?.id;
+      if (!msgId || !pendingSends.has(msgId)) continue;
+      const info = pendingSends.get(msgId);
+      const status = u.update?.status;
+      if (status !== undefined) {
+        // status: 0=ERROR, 1=PENDING, 2=SERVER_ACK, 3=DELIVERY_ACK, 4=READ
+        const statusNames = { 0: "ERROR", 1: "PENDING", 2: "SERVER_ACK", 3: "DELIVERY_ACK", 4: "READ" };
+        console.log(`[${id}] delivery update for ${info.jid} (id=${msgId}): status=${statusNames[status] || status}`);
+        if (status === 0) {
+          console.error(`[${id}] message to ${info.jid} (id=${msgId}) came back as ERROR — it did NOT reach the recipient.`);
+        }
+        if (status >= 2) pendingSends.delete(msgId); // reached WhatsApp's server at minimum; stop tracking
+      }
+    }
+  });
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     console.log(`[${id}] messages.upsert type=${type} count=${messages.length}`);
