@@ -780,6 +780,40 @@ async function deleteAccount(id) {
 // that were previously connected/connecting using their saved session -
 // no re-scan needed. Accounts saved as 'disconnected' are listed but not
 // auto-started; the user reconnects them manually from the dashboard.
+// ==================== Admin session maintenance ====================
+// "Unused" sessions = rows in auth_data whose account_id has no matching
+// row in `accounts` anymore — leftover login data for accounts that got
+// removed outside the normal deleteAccount() flow (a crash mid-delete, a
+// manual DB edit, restoring an old backup, etc). Ordinary operation never
+// creates or touches these, so left alone they only ever accumulate.
+//
+// IMPORTANT: this only ever looks at/deletes auth_data rows with NO
+// matching account. It never touches a session belonging to an account
+// still listed in `accounts` — connected, disconnected, or paused — so it
+// cannot disconnect a live bot no matter when it's run.
+async function findOrphanedSessionAccountIds() {
+  if (!isConfigured()) return [];
+  const pool = getPool();
+  const [rows] = await pool.query(`
+    SELECT ad.account_id AS id, COUNT(*) AS row_count
+    FROM auth_data ad
+    LEFT JOIN accounts a ON a.id = ad.account_id
+    WHERE a.id IS NULL
+    GROUP BY ad.account_id
+  `);
+  return rows.map((r) => ({ id: r.id, rowCount: Number(r.row_count) }));
+}
+
+async function clearOrphanedSessions() {
+  if (!isConfigured()) return { cleared: 0, accountIds: [] };
+  const orphans = await findOrphanedSessionAccountIds();
+  if (!orphans.length) return { cleared: 0, accountIds: [] };
+  const pool = getPool();
+  const ids = orphans.map((o) => o.id);
+  await pool.query(`DELETE FROM auth_data WHERE account_id IN (${ids.map(() => "?").join(",")})`, ids);
+  return { cleared: ids.length, accountIds: ids };
+}
+
 async function resumeAccountsFromDB() {
   if (!isConfigured()) return;
   const pool = getPool();
@@ -814,5 +848,7 @@ module.exports = {
   getAccountRuntime,
   refreshGroups,
   resumeAccountsFromDB,
-  deleteAccount
+  deleteAccount,
+  findOrphanedSessionAccountIds,
+  clearOrphanedSessions
 };

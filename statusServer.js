@@ -335,6 +335,38 @@ function startServer(port) {
     res.json(settings);
   });
 
+  // ---- Admin: session maintenance ----
+
+  // Read-only preview of orphaned sessions (auth_data rows with no matching
+  // account row) — safe to call anytime, never deletes anything by itself.
+  app.get("/api/admin/orphaned-sessions", async (req, res) => {
+    try {
+      const accounts = await accountManager.findOrphanedSessionAccountIds();
+      res.json({ count: accounts.length, accounts });
+    } catch (err) {
+      console.error("Failed to list orphaned sessions:", err.message);
+      res.status(500).json({ error: "Failed to check for orphaned sessions." });
+    }
+  });
+
+  // Permanently deletes ONLY auth_data rows that have no matching account —
+  // never touches a session belonging to an account still in the `accounts`
+  // table, connected or not, so this can't disconnect a live bot. Still a
+  // hard, un-undoable delete, so it requires an explicit { confirm: true }
+  // in the body rather than firing off a bare POST.
+  app.post("/api/admin/clear-orphaned-sessions", async (req, res) => {
+    if (req.body?.confirm !== true) {
+      return res.status(400).json({ error: "Pass { confirm: true } to proceed with this permanent action." });
+    }
+    try {
+      const result = await accountManager.clearOrphanedSessions();
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      console.error("Failed to clear orphaned sessions:", err.message);
+      res.status(500).json({ error: "Failed to clear orphaned sessions." });
+    }
+  });
+
   // ---- Single-page dashboard (no more full-page reloads) ----
   app.use(express.static(path.join(__dirname, "public")));
   app.get("*", (req, res) => {
