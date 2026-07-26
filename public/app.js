@@ -65,13 +65,82 @@ async function render() {
 
 async function renderList() {
   app.innerHTML = `
-    <div class="topbar"><h1>WhatsApp Accounts</h1></div>
+    <div class="topbar">
+      <h1>WhatsApp Accounts</h1>
+      <button type="button" class="secondary" id="admin-cleanup-btn" style="width:auto;padding:8px 14px;font-size:0.85em">🧹 Clean up sessions</button>
+    </div>
     <div id="list-body" class="center" style="padding:30px 0;color:var(--muted)">Loading…</div>
     <button class="fab" id="add-btn">+</button>
   `;
   document.getElementById("add-btn").onclick = openAddModal;
+  document.getElementById("admin-cleanup-btn").onclick = openCleanupModal;
   await refreshList();
   pollTimer = setInterval(refreshList, 4000);
+}
+
+// ---------------- Admin: clear unused sessions ----------------
+// "Unused" sessions are login data for accounts that no longer exist in
+// the accounts list (leftovers from a crash, manual DB edit, etc). This
+// never touches a session belonging to an account still shown in this
+// dashboard, connected or not.
+
+async function openCleanupModal() {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal">
+      <h2>Clean Up Unused Sessions</h2>
+      <div id="cleanup-body" class="center" style="padding:16px 0;color:var(--muted)">Checking for unused sessions…</div>
+      <div class="modal-actions">
+        <button type="button" class="secondary" id="cleanup-cancel-btn">Close</button>
+        <button type="button" class="danger" id="cleanup-confirm-btn" style="display:none">Clear them</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.querySelector("#cleanup-cancel-btn").onclick = () => overlay.remove();
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+
+  const body = overlay.querySelector("#cleanup-body");
+  const confirmBtn = overlay.querySelector("#cleanup-confirm-btn");
+
+  let preview;
+  try {
+    preview = await api("/api/admin/orphaned-sessions");
+  } catch (e) {
+    body.textContent = e.message || "Could not check for unused sessions.";
+    return;
+  }
+
+  if (!preview.count) {
+    body.textContent = "No unused sessions found. Everything in the database belongs to an account you can see in the list.";
+    return;
+  }
+
+  body.innerHTML = `
+    <p style="margin:0 0 10px">Found <strong>${preview.count}</strong> unused session${preview.count === 1 ? "" : "s"} — login data left over from account(s) no longer in your list.</p>
+    <p style="margin:0;font-size:0.88em">This will NOT affect any account you can currently see, connected or not. This cannot be undone.</p>
+  `;
+  confirmBtn.style.display = "block";
+  confirmBtn.onclick = async () => {
+    if (!confirm(`Permanently delete ${preview.count} unused session${preview.count === 1 ? "" : "s"}? This cannot be undone.`)) return;
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = "Clearing…";
+    try {
+      const result = await api("/api/admin/clear-orphaned-sessions", {
+        method: "POST",
+        body: JSON.stringify({ confirm: true })
+      });
+      body.innerHTML = `<p style="margin:0">✅ Cleared ${result.cleared} unused session${result.cleared === 1 ? "" : "s"}.</p>`;
+      confirmBtn.style.display = "none";
+    } catch (e) {
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = "Clear them";
+      toast(e.message || "Failed to clear unused sessions.");
+    }
+  };
 }
 
 async function refreshList() {
