@@ -221,6 +221,17 @@ async function startAccount(id, phoneNumber, isRetry = false) {
   runtime.qr = null;
   runtime.pairingCode = null;
   runtime.paused = false;
+  // Baileys still fires periodic 'qr' connection.update events (an
+  // automatic refresh roughly every 20-60s) even while a pairing code has
+  // already been requested and is waiting to be entered — the QR is just
+  // an alternate, always-live login path that Baileys keeps warm in the
+  // background. Without this flag, the connection.update handler below
+  // would treat that refresh as "the login screen is QR now" and flip
+  // status back to 'qr', overwriting the pairing code the owner is
+  // actively looking at. Sending it once per startAccount call (not
+  // once at module load) means this correctly resets if the owner
+  // switches back to plain QR login later via a fresh startAccount call.
+  runtime.usePairing = Boolean(phoneNumber);
   if (!isRetry) runtime.reconnectAttempts = 0;
 
   const { state, saveCreds } = await useDBAuthState(id);
@@ -286,7 +297,7 @@ async function startAccount(id, phoneNumber, isRetry = false) {
     clearTimeout(stallTimer);
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
+    if (qr && !runtime.usePairing) {
       runtime.qr = qr;
       runtime.status = "qr";
     }
