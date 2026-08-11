@@ -62,7 +62,8 @@ function serializeAccount(a, runtime) {
     pairingCode: runtime?.pairingCode || null,
     groupCount: groups.length,
     groups,
-    watermark: runtime?.watermark !== false
+    watermark: runtime?.watermark !== false,
+    purpose: runtime?.purpose === "ads" ? "ads" : "moderator"
   };
 }
 
@@ -85,8 +86,8 @@ function startServer(port) {
   });
 
   app.post("/api/accounts", async (req, res) => {
-    const { label, method, phone_number, watermark } = req.body || {};
-    const id = await accountManager.createAccount(label, watermark !== false);
+    const { label, method, phone_number, watermark, purpose } = req.body || {};
+    const id = await accountManager.createAccount(label, watermark !== false, purpose === "ads" ? "ads" : "moderator");
     const phoneNumber = method === "pairing" ? String(phone_number || "").replace(/\D/g, "") : null;
     if (method === "pairing" && !phoneNumber) {
       return res.status(400).json({ error: "Phone number is required for pairing code login." });

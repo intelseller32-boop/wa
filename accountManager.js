@@ -108,6 +108,7 @@ function withWatermark(text, runtime) {
 async function listAccounts() {
   return Array.from(liveAccounts.entries()).map(([id, a]) => ({
     id,
+    purpose: a.purpose === "ads" ? "ads" : "moderator",
     label: a.label,
     phone_number: a.phoneNumber || "",
     status: a.status
@@ -126,12 +127,13 @@ function getAccountRuntime(id) {
   return liveAccounts.get(id);
 }
 
-async function createAccount(label, watermark = true) {
+async function createAccount(label, watermark = true, purpose = "moderator") {
   const id = crypto.randomUUID();
+  const safePurpose = purpose === "ads" ? "ads" : "moderator";
   if (isConfigured()) {
     await getPool().query(
-      "INSERT INTO accounts (id, label, status, watermark) VALUES (?, ?, 'connecting', ?)",
-      [id, label || "WhatsApp Account", watermark ? 1 : 0]
+      "INSERT INTO accounts (id, label, status, watermark, purpose) VALUES (?, ?, 'connecting', ?, ?)",
+      [id, label || "WhatsApp Account", watermark ? 1 : 0, safePurpose]
     );
   }
   liveAccounts.set(id, {
@@ -143,7 +145,8 @@ async function createAccount(label, watermark = true) {
     groups: new Map(),
     pinnedWelcome: new Map(),
     reconnectAttempts: 0,
-    watermark: watermark !== false
+    watermark: watermark !== false,
+    purpose: safePurpose
   });
   return id;
 }
@@ -370,6 +373,11 @@ async function startAccount(id, phoneNumber, isRetry = false) {
   sock.ev.on("groups.update", () => refreshGroups(id));
 
   sock.ev.on("group-participants.update", async (event) => {
+    // "ads"-purpose accounts (linked from ad-hub's promote.html) only ever
+    // send whatever they're told to via the /send API — they never welcome
+    // joiners on their own. Only "moderator"-purpose accounts (linked from
+    // the wabot module) do that.
+    if (runtime.purpose === "ads") return;
     try {
       const { id: groupId, participants, action } = event;
       if (action === "add") {
@@ -659,6 +667,15 @@ async function startAccount(id, phoneNumber, isRetry = false) {
         continue; // never engage statuses, broadcasts, newsletters, etc.
       }
 
+      // "ads"-purpose accounts are for posting ads only — they never react
+      // to group activity on their own (no auto-reply, no banned-word/link
+      // moderation, no deleting/kicking, no "make me admin" nagging). They
+      // only ever send what the /send API explicitly tells them to.
+      if (runtime.purpose === "ads") {
+        console.log(`[${id}] skip: purpose=ads, ignoring inbound group message (remoteJid=${remoteJid})`);
+        continue;
+      }
+
       const senderId = msg.key.participant || msg.key.remoteJid;
 
       const text =
@@ -929,7 +946,7 @@ async function clearOrphanedSessions() {
 async function resumeAccountsFromDB() {
   if (!isConfigured()) return;
   const pool = getPool();
-  const [rows] = await pool.query("SELECT id, label, phone_number, status, watermark FROM accounts");
+  const [rows] = await pool.query("SELECT id, label, phone_number, status, watermark, purpose FROM accounts");
   for (const row of rows) {
     liveAccounts.set(row.id, {
       label: row.label,
@@ -941,7 +958,8 @@ async function resumeAccountsFromDB() {
       pinnedWelcome: new Map(),
       reconnectAttempts: 0,
       paused: row.status === "paused",
-      watermark: row.watermark !== 0
+      watermark: row.watermark !== 0,
+      purpose: row.purpose === "ads" ? "ads" : "moderator"
     });
     if (row.status !== "disconnected" && row.status !== "paused") {
       startAccount(row.id, row.phone_number).catch((err) =>

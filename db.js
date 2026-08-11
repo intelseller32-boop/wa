@@ -40,6 +40,17 @@ async function initDb() {
   if (Number(wmCol[0].n) === 0) {
     await p.query(`ALTER TABLE accounts ADD COLUMN watermark TINYINT(1) NOT NULL DEFAULT 1`);
   }
+  // 'moderator' (default) = full group moderation (banned words/links,
+  // welcome messages, warnings/kicks, admin-rights nagging) — used by the
+  // wabot module. 'ads' = outbound-only, used by ad-hub's promote.html:
+  // the account only ever sends whatever it's told via the /send API and
+  // never reacts to group activity on its own.
+  const [purposeCol] = await p.query(
+    `SELECT COUNT(*) AS n FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts' AND COLUMN_NAME = 'purpose'`
+  );
+  if (Number(purposeCol[0].n) === 0) {
+    await p.query(`ALTER TABLE accounts ADD COLUMN purpose VARCHAR(16) NOT NULL DEFAULT 'moderator'`);
+  }
 
   // WhatsApp login session data (replaces the old file-based auth_info folder)
   await p.query(`
