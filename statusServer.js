@@ -134,6 +134,58 @@ function startServer(port) {
     res.json({ groups });
   });
 
+  // ── Ad-Hub: group + channel posting ──
+  // Used by the marketplace's ad-hub module to post scheduled/instant ads.
+  // wa-main just sends whatever text it's given; the caller composes the
+  // ad text (footer, link, etc.) itself.
+
+  // Groups the account is already a member of are listed via the existing
+  // GET /api/accounts/:id (its `groups` field) — no separate route needed.
+
+  app.post("/api/accounts/:id/groups/:groupId/send", async (req, res) => {
+    const { id, groupId } = req.params;
+    const text = String(req.body?.text || "").trim();
+    if (!text) return res.status(400).json({ error: "text is required" });
+    try {
+      const result = await accountManager.sendGroupMessage(id, groupId, text);
+      res.json({ ok: true, messageId: result.id });
+    } catch (err) {
+      console.error(`[${id}] ad send to group ${groupId} failed:`, err.message);
+      const status = err.code === "NOT_CONNECTED" ? 409 : err.code === "NOT_A_MEMBER" ? 404 : 500;
+      res.status(status).json({ ok: false, error: err.message, code: err.code });
+    }
+  });
+
+  // Looks up a WhatsApp Channel by invite link/code/jid and reports whether
+  // this account can post to it. Read-only — does not link/follow anything.
+  app.post("/api/accounts/:id/channels/lookup", async (req, res) => {
+    const { id } = req.params;
+    const input = req.body?.input;
+    try {
+      const channel = await accountManager.lookupChannel(id, input);
+      res.json({ ok: true, channel });
+    } catch (err) {
+      console.error(`[${id}] channel lookup failed:`, err.message);
+      const status = err.code === "NOT_CONNECTED" ? 409 : err.code === "BAD_CHANNEL_INPUT" ? 400 : 404;
+      res.status(status).json({ ok: false, error: err.message, code: err.code });
+    }
+  });
+
+  app.post("/api/accounts/:id/channels/:channelId/send", async (req, res) => {
+    const { id } = req.params;
+    const channelId = decodeURIComponent(req.params.channelId);
+    const text = String(req.body?.text || "").trim();
+    if (!text) return res.status(400).json({ error: "text is required" });
+    try {
+      const result = await accountManager.sendChannelMessage(id, channelId, text);
+      res.json({ ok: true, messageId: result.id });
+    } catch (err) {
+      console.error(`[${id}] ad send to channel ${channelId} failed:`, err.message);
+      const status = err.code === "NOT_CONNECTED" ? 409 : 500;
+      res.status(status).json({ ok: false, error: err.message, code: err.code });
+    }
+  });
+
   app.get("/api/accounts/:id/qr.png", async (req, res) => {
     const runtime = accountManager.getAccountRuntime(req.params.id);
     if (!runtime?.qr) return res.status(404).send("No QR available right now.");

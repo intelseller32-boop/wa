@@ -745,6 +745,107 @@ async function startAccount(id, phoneNumber, isRetry = false) {
   });
 }
 
+// ==================== Ad-Hub messaging (groups + channels) ====================
+// These are called by the marketplace's ad-hub module (a separate project)
+// through the same wa-client/x-api-key proxy used for everything else here.
+// wa-main stays a dumb pipe: it doesn't know what an "ad" is, doesn't store
+// ad content, and doesn't schedule anything — it just sends whatever text
+// it's handed to a group or channel jid on a connected account, right now.
+// Composition (footer/branding, link, scheduling) is entirely the caller's
+// job, same as how it already builds the Telegram post text.
+
+function assertSendable(runtime, id) {
+  if (!runtime || !runtime.sock) {
+    const err = new Error("Account is not connected.");
+    err.code = "NOT_CONNECTED";
+    throw err;
+  }
+  if (runtime.status !== "connected") {
+    const err = new Error(`Account is ${runtime.status}, not connected.`);
+    err.code = "NOT_CONNECTED";
+    throw err;
+  }
+}
+
+// Sends a plain-text ad post into a group this account is a member of.
+// `groupId` is the group's normal @g.us jid.
+async function sendGroupMessage(id, groupId, text) {
+  const runtime = liveAccounts.get(id);
+  assertSendable(runtime, id);
+  if (!runtime.groups.has(groupId)) {
+    const err = new Error("This account is no longer a member of that group.");
+    err.code = "NOT_A_MEMBER";
+    throw err;
+  }
+  const result = await runtime.sock.sendMessage(groupId, { text });
+  if (!result?.key?.id) {
+    const err = new Error("sendMessage returned no message key — send likely did not go through.");
+    err.code = "SEND_FAILED";
+    throw err;
+  }
+  return { id: result.key.id };
+}
+
+// Sends a plain-text ad post into a WhatsApp Channel (Baileys calls these
+// "newsletters") that this account owns or admins. `channelJid` is the
+// channel's @newsletter jid.
+async function sendChannelMessage(id, channelJid, text) {
+  const runtime = liveAccounts.get(id);
+  assertSendable(runtime, id);
+  const result = await runtime.sock.sendMessage(channelJid, { text });
+  if (!result?.key?.id) {
+    const err = new Error("sendMessage returned no message key — send likely did not go through.");
+    err.code = "SEND_FAILED";
+    throw err;
+  }
+  return { id: result.key.id };
+}
+
+// Parses whatever the owner pasted (a full https://whatsapp.com/channel/<code>
+// link, a bare invite code, or a raw <digits>@newsletter jid) into the
+// {mode, key} pair sock.newsletterMetadata() expects.
+function parseChannelInput(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return null;
+  if (value.endsWith("@newsletter")) return { mode: "jid", key: value };
+  const linkMatch = value.match(/whatsapp\.com\/channel\/([A-Za-z0-9]+)/i);
+  if (linkMatch) return { mode: "invite", key: linkMatch[1] };
+  // Bare invite code (no slashes/spaces) — anything else is unrecognized.
+  if (/^[A-Za-z0-9]+$/.test(value)) return { mode: "invite", key: value };
+  return null;
+}
+
+// Looks up a channel by invite link/code/jid and reports whether this
+// account can post to it (must be OWNER or ADMIN — regular followers can't
+// send). Read-only: does not follow or link anything.
+async function lookupChannel(id, rawInput) {
+  const runtime = liveAccounts.get(id);
+  assertSendable(runtime, id);
+  const parsed = parseChannelInput(rawInput);
+  if (!parsed) {
+    const err = new Error("Couldn't recognize that as a WhatsApp Channel link, code, or ID.");
+    err.code = "BAD_CHANNEL_INPUT";
+    throw err;
+  }
+  const meta = await runtime.sock.newsletterMetadata(parsed.mode, parsed.key);
+  if (!meta) {
+    const err = new Error("Channel not found.");
+    err.code = "CHANNEL_NOT_FOUND";
+    throw err;
+  }
+  const role = meta.viewer_metadata?.role || meta.role || null;
+  const canPost = role === "OWNER" || role === "ADMIN";
+  return {
+    jid: meta.id,
+    name: meta.thread_metadata?.name?.text || meta.name || "",
+    description: meta.thread_metadata?.description?.text || "",
+    subscriberCount: meta.thread_metadata?.subscribers_count ?? meta.subscribers_count ?? 0,
+    pictureUrl: meta.thread_metadata?.picture?.url || null,
+    role,
+    canPost
+  };
+}
+
 async function deleteAccount(id) {
   const runtime = liveAccounts.get(id);
   if (runtime?.sock) {
@@ -850,5 +951,8 @@ module.exports = {
   resumeAccountsFromDB,
   deleteAccount,
   findOrphanedSessionAccountIds,
-  clearOrphanedSessions
+  clearOrphanedSessions,
+  sendGroupMessage,
+  sendChannelMessage,
+  lookupChannel
 };
