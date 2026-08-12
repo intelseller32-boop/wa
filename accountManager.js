@@ -191,14 +191,23 @@ async function pauseAccount(id) {
   return { ok: true };
 }
 
-async function refreshGroups(id) {
+async function refreshGroups(id, attempt = 0) {
   const runtime = liveAccounts.get(id);
   if (!runtime?.sock) return;
   try {
     const groups = await runtime.sock.groupFetchAllParticipating();
     runtime.groups = new Map(Object.values(groups).map((g) => [g.id, g.subject]));
+    console.log(`[${id}] refreshed group list: ${runtime.groups.size} group(s)`);
   } catch (err) {
-    console.error(`[${id}] failed to fetch groups:`, err.message);
+    console.error(`[${id}] failed to fetch groups (attempt ${attempt + 1}):`, err.message);
+    // Rate limits / timeouts right after a (re)connect are common and
+    // transient — retry a few times with backoff instead of permanently
+    // leaving runtime.groups empty, which would make every group look like
+    // "not a member" until the next lucky groups.update/connection.open event.
+    if (attempt < 4) {
+      const delay = [5000, 15000, 30000, 60000][attempt] || 60000;
+      setTimeout(() => refreshGroups(id, attempt + 1), delay);
+    }
   }
 }
 
@@ -799,17 +808,25 @@ function assertSendable(runtime, id) {
 
 // Sends a plain-text ad post into a group this account is a member of.
 // `groupId` is the group's normal @g.us jid. If `imageUrl` is given, sends
-// it as an image with `text` as the caption instead of a plain text message
-// (Baileys fetches the image straight from that URL, no upload needed).
+// it as an image with `text` as the caption instead of a plain text message.
 async function sendGroupMessage(id, groupId, text, imageUrl) {
   const runtime = liveAccounts.get(id);
   console.log(`[${id}][ad-hub send] group=${groupId} status=${runtime?.status || "unknown"} purpose=${runtime?.purpose || "unknown"} knownGroups=${runtime?.groups?.size ?? "n/a"} hasImage=${!!imageUrl}`);
   assertSendable(runtime, id);
   if (!runtime.groups.has(groupId)) {
-    console.error(`[${id}][ad-hub send] group ${groupId} not found in this account's known groups list — account may have been removed from the group, or hasn't synced its group list yet`);
-    const err = new Error("This account is no longer a member of that group.");
-    err.code = "NOT_A_MEMBER";
-    throw err;
+    // The cached group list can be empty/stale right after a reconnect (e.g.
+    // a rate-limited fetch on connect) even though the account really is
+    // still a member. Before giving up, do one live refresh and re-check
+    // rather than trusting a possibly-stale/empty cache.
+    console.warn(`[${id}][ad-hub send] group ${groupId} not in cached list (size=${runtime.groups.size}) — refreshing group list before failing`);
+    await refreshGroups(id);
+    if (!runtime.groups.has(groupId)) {
+      console.error(`[${id}][ad-hub send] group ${groupId} still not found after live refresh (now ${runtime.groups.size} known) — account is genuinely not a member, or was removed`);
+      const err = new Error("This account is no longer a member of that group.");
+      err.code = "NOT_A_MEMBER";
+      throw err;
+    }
+    console.log(`[${id}][ad-hub send] group ${groupId} found after refresh — proceeding`);
   }
   const result = await sendMessageWithOptionalImage(runtime.sock, groupId, text, imageUrl, id);
   console.log(`[${id}][ad-hub send] OK group=${groupId} msgId=${result.key.id}`);
