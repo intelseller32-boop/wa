@@ -798,10 +798,12 @@ function assertSendable(runtime, id) {
 }
 
 // Sends a plain-text ad post into a group this account is a member of.
-// `groupId` is the group's normal @g.us jid.
-async function sendGroupMessage(id, groupId, text) {
+// `groupId` is the group's normal @g.us jid. If `imageUrl` is given, sends
+// it as an image with `text` as the caption instead of a plain text message
+// (Baileys fetches the image straight from that URL, no upload needed).
+async function sendGroupMessage(id, groupId, text, imageUrl) {
   const runtime = liveAccounts.get(id);
-  console.log(`[${id}][ad-hub send] group=${groupId} status=${runtime?.status || "unknown"} purpose=${runtime?.purpose || "unknown"} knownGroups=${runtime?.groups?.size ?? "n/a"}`);
+  console.log(`[${id}][ad-hub send] group=${groupId} status=${runtime?.status || "unknown"} purpose=${runtime?.purpose || "unknown"} knownGroups=${runtime?.groups?.size ?? "n/a"} hasImage=${!!imageUrl}`);
   assertSendable(runtime, id);
   if (!runtime.groups.has(groupId)) {
     console.error(`[${id}][ad-hub send] group ${groupId} not found in this account's known groups list — account may have been removed from the group, or hasn't synced its group list yet`);
@@ -809,33 +811,49 @@ async function sendGroupMessage(id, groupId, text) {
     err.code = "NOT_A_MEMBER";
     throw err;
   }
-  const result = await runtime.sock.sendMessage(groupId, { text });
-  if (!result?.key?.id) {
-    console.error(`[${id}][ad-hub send] sendMessage to group ${groupId} returned no message key`);
-    const err = new Error("sendMessage returned no message key — send likely did not go through.");
-    err.code = "SEND_FAILED";
-    throw err;
-  }
+  const result = await sendMessageWithOptionalImage(runtime.sock, groupId, text, imageUrl, id);
   console.log(`[${id}][ad-hub send] OK group=${groupId} msgId=${result.key.id}`);
   return { id: result.key.id };
 }
 
 // Sends a plain-text ad post into a WhatsApp Channel (Baileys calls these
 // "newsletters") that this account owns or admins. `channelJid` is the
-// channel's @newsletter jid.
-async function sendChannelMessage(id, channelJid, text) {
+// channel's @newsletter jid. Same optional `imageUrl` behavior as above.
+async function sendChannelMessage(id, channelJid, text, imageUrl) {
   const runtime = liveAccounts.get(id);
-  console.log(`[${id}][ad-hub send] channel=${channelJid} status=${runtime?.status || "unknown"} purpose=${runtime?.purpose || "unknown"}`);
+  console.log(`[${id}][ad-hub send] channel=${channelJid} status=${runtime?.status || "unknown"} purpose=${runtime?.purpose || "unknown"} hasImage=${!!imageUrl}`);
   assertSendable(runtime, id);
-  const result = await runtime.sock.sendMessage(channelJid, { text });
+  const result = await sendMessageWithOptionalImage(runtime.sock, channelJid, text, imageUrl, id);
+  console.log(`[${id}][ad-hub send] OK channel=${channelJid} msgId=${result.key.id}`);
+  return { id: result.key.id };
+}
+
+// Shared by sendGroupMessage/sendChannelMessage. If imageUrl looks like a
+// valid http(s) URL, sends the image with `text` as its caption; on any
+// failure to send as an image (bad URL, host down, WhatsApp rejects it,
+// etc.) falls back to a plain text message so the ad still goes out rather
+// than silently disappearing.
+async function sendMessageWithOptionalImage(sock, jid, text, imageUrl, id) {
+  const cleanUrl = typeof imageUrl === "string" ? imageUrl.trim() : "";
+  const hasImage = /^https?:\/\//i.test(cleanUrl);
+  if (hasImage) {
+    try {
+      const result = await sock.sendMessage(jid, { image: { url: cleanUrl }, caption: text });
+      if (!result?.key?.id) {
+        throw new Error("sendMessage (image) returned no message key");
+      }
+      return result;
+    } catch (err) {
+      console.error(`[${id}][ad-hub send] image send failed (${err.message}) — falling back to text-only for ${jid}`);
+    }
+  }
+  const result = await sock.sendMessage(jid, { text });
   if (!result?.key?.id) {
-    console.error(`[${id}][ad-hub send] sendMessage to channel ${channelJid} returned no message key`);
     const err = new Error("sendMessage returned no message key — send likely did not go through.");
     err.code = "SEND_FAILED";
     throw err;
   }
-  console.log(`[${id}][ad-hub send] OK channel=${channelJid} msgId=${result.key.id}`);
-  return { id: result.key.id };
+  return result;
 }
 
 // Parses whatever the owner pasted (a full https://whatsapp.com/channel/<code>

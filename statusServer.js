@@ -146,9 +146,10 @@ function startServer(port) {
   app.post("/api/accounts/:id/groups/:groupId/send", async (req, res) => {
     const { id, groupId } = req.params;
     const text = String(req.body?.text || "").trim();
+    const imageUrl = req.body?.imageUrl ? String(req.body.imageUrl).trim() : "";
     if (!text) return res.status(400).json({ error: "text is required" });
     try {
-      const result = await accountManager.sendGroupMessage(id, groupId, text);
+      const result = await accountManager.sendGroupMessage(id, groupId, text, imageUrl);
       res.json({ ok: true, messageId: result.id });
     } catch (err) {
       console.error(`[${id}] ad send to group ${groupId} failed:`, err.message);
@@ -176,9 +177,10 @@ function startServer(port) {
     const { id } = req.params;
     const channelId = decodeURIComponent(req.params.channelId);
     const text = String(req.body?.text || "").trim();
+    const imageUrl = req.body?.imageUrl ? String(req.body.imageUrl).trim() : "";
     if (!text) return res.status(400).json({ error: "text is required" });
     try {
-      const result = await accountManager.sendChannelMessage(id, channelId, text);
+      const result = await accountManager.sendChannelMessage(id, channelId, text, imageUrl);
       res.json({ ok: true, messageId: result.id });
     } catch (err) {
       console.error(`[${id}] ad send to channel ${channelId} failed:`, err.message);
