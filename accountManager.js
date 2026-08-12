@@ -829,16 +829,31 @@ async function sendChannelMessage(id, channelJid, text, imageUrl) {
 }
 
 // Shared by sendGroupMessage/sendChannelMessage. If imageUrl looks like a
-// valid http(s) URL, sends the image with `text` as its caption; on any
-// failure to send as an image (bad URL, host down, WhatsApp rejects it,
-// etc.) falls back to a plain text message so the ad still goes out rather
-// than silently disappearing.
+// valid http(s) URL, downloads it ourselves and sends it as an image with
+// `text` as its caption. We fetch the bytes ourselves (rather than handing
+// Baileys the bare URL via { image: { url } }) because Baileys' own fetch
+// sends no special headers, and hosts like imgbb hotlink-block bare
+// requests like that (returns 404) — the same reason this project already
+// has an /api/image-proxy route with a spoofed User-Agent/Referer for imgbb.
+// On any failure to fetch/send the image, falls back to a plain text
+// message so the ad still goes out rather than silently disappearing.
 async function sendMessageWithOptionalImage(sock, jid, text, imageUrl, id) {
   const cleanUrl = typeof imageUrl === "string" ? imageUrl.trim() : "";
   const hasImage = /^https?:\/\//i.test(cleanUrl);
   if (hasImage) {
     try {
-      const result = await sock.sendMessage(jid, { image: { url: cleanUrl }, caption: text });
+      const imgRes = await fetch(cleanUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Referer": "https://imgbb.com/",
+          "Accept": "image/webp,image/apng,image/*,*/*;q=0.8"
+        }
+      });
+      if (!imgRes.ok) {
+        throw new Error(`image host returned ${imgRes.status}`);
+      }
+      const buffer = Buffer.from(await imgRes.arrayBuffer());
+      const result = await sock.sendMessage(jid, { image: buffer, caption: text });
       if (!result?.key?.id) {
         throw new Error("sendMessage (image) returned no message key");
       }
