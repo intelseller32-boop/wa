@@ -784,11 +784,13 @@ async function startAccount(id, phoneNumber, isRetry = false) {
 
 function assertSendable(runtime, id) {
   if (!runtime || !runtime.sock) {
+    console.error(`[${id}][ad-hub send] blocked: no runtime/socket for this account id — it may not exist on this wa-main instance at all (check the remote_id stored on the caller side matches an account actually created here)`);
     const err = new Error("Account is not connected.");
     err.code = "NOT_CONNECTED";
     throw err;
   }
   if (runtime.status !== "connected") {
+    console.error(`[${id}][ad-hub send] blocked: status=${runtime.status} (needs to be "connected") — the WhatsApp session for this account is disconnected, still connecting/scanning QR, or was logged out`);
     const err = new Error(`Account is ${runtime.status}, not connected.`);
     err.code = "NOT_CONNECTED";
     throw err;
@@ -799,18 +801,22 @@ function assertSendable(runtime, id) {
 // `groupId` is the group's normal @g.us jid.
 async function sendGroupMessage(id, groupId, text) {
   const runtime = liveAccounts.get(id);
+  console.log(`[${id}][ad-hub send] group=${groupId} status=${runtime?.status || "unknown"} purpose=${runtime?.purpose || "unknown"} knownGroups=${runtime?.groups?.size ?? "n/a"}`);
   assertSendable(runtime, id);
   if (!runtime.groups.has(groupId)) {
+    console.error(`[${id}][ad-hub send] group ${groupId} not found in this account's known groups list — account may have been removed from the group, or hasn't synced its group list yet`);
     const err = new Error("This account is no longer a member of that group.");
     err.code = "NOT_A_MEMBER";
     throw err;
   }
   const result = await runtime.sock.sendMessage(groupId, { text });
   if (!result?.key?.id) {
+    console.error(`[${id}][ad-hub send] sendMessage to group ${groupId} returned no message key`);
     const err = new Error("sendMessage returned no message key — send likely did not go through.");
     err.code = "SEND_FAILED";
     throw err;
   }
+  console.log(`[${id}][ad-hub send] OK group=${groupId} msgId=${result.key.id}`);
   return { id: result.key.id };
 }
 
@@ -819,13 +825,16 @@ async function sendGroupMessage(id, groupId, text) {
 // channel's @newsletter jid.
 async function sendChannelMessage(id, channelJid, text) {
   const runtime = liveAccounts.get(id);
+  console.log(`[${id}][ad-hub send] channel=${channelJid} status=${runtime?.status || "unknown"} purpose=${runtime?.purpose || "unknown"}`);
   assertSendable(runtime, id);
   const result = await runtime.sock.sendMessage(channelJid, { text });
   if (!result?.key?.id) {
+    console.error(`[${id}][ad-hub send] sendMessage to channel ${channelJid} returned no message key`);
     const err = new Error("sendMessage returned no message key — send likely did not go through.");
     err.code = "SEND_FAILED";
     throw err;
   }
+  console.log(`[${id}][ad-hub send] OK channel=${channelJid} msgId=${result.key.id}`);
   return { id: result.key.id };
 }
 
