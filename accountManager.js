@@ -859,6 +859,7 @@ async function sendMessageWithOptionalImage(sock, jid, text, imageUrl, id) {
   const hasImage = /^https?:\/\//i.test(cleanUrl);
   if (hasImage) {
     try {
+      console.log(`[${id}][ad-hub send] fetching image: ${cleanUrl}`);
       const imgRes = await fetch(cleanUrl, {
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -867,7 +868,7 @@ async function sendMessageWithOptionalImage(sock, jid, text, imageUrl, id) {
         }
       });
       if (!imgRes.ok) {
-        throw new Error(`image host returned ${imgRes.status}`);
+        throw new Error(`image host returned ${imgRes.status} for ${cleanUrl}`);
       }
       const buffer = Buffer.from(await imgRes.arrayBuffer());
       const result = await sock.sendMessage(jid, { image: buffer, caption: text });
