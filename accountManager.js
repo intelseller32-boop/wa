@@ -907,12 +907,13 @@ async function sendGroupStatus(id, groupId, { kind, text, mediaUrl, caption, bac
 
   let innerMessage;
   if (kind === "text") {
-    const cleanText = String(text || "").trim();
-    if (!cleanText) {
+    const rawText = String(text || "").trim();
+    if (!rawText) {
       const err = new Error("text is required for a text status.");
       err.code = "BAD_INPUT";
       throw err;
     }
+    const cleanText = withWatermark(rawText, runtime);
     innerMessage = await generateWAMessageContent(
       { text: cleanText },
       { ...genOptions, backgroundColor, font }
@@ -936,8 +937,9 @@ async function sendGroupStatus(id, groupId, { kind, text, mediaUrl, caption, bac
       throw new Error(`media host returned ${mediaRes.status} for ${cleanUrl}`);
     }
     const buffer = Buffer.from(await mediaRes.arrayBuffer());
+    const watermarkedCaption = withWatermark(String(caption || "").trim(), runtime);
     innerMessage = await prepareWAMessageMedia(
-      kind === "image" ? { image: buffer, caption } : { video: buffer, caption },
+      kind === "image" ? { image: buffer, caption: watermarkedCaption } : { video: buffer, caption: watermarkedCaption },
       genOptions
     );
   } else {
@@ -954,10 +956,11 @@ async function sendGroupStatus(id, groupId, { kind, text, mediaUrl, caption, bac
     err.code = "SEND_FAILED";
     throw err;
   }
-  // Same accrual-billing path as the bot's own automatic sends (welcome/
-  // warning/kick) — counted against the owner and settled at next renewal,
-  // rather than an instant balance charge. See config.js / usageStore.
-  usageStore.increment(id, { messages: 1 }).catch(() => {});
+  // Billed separately from ordinary bot messages (see config.js
+  // USAGE_PRICE_PER_STATUS_POST on the wabot/billing side) — same accrual
+  // ledger mechanism, just its own counter so it isn't priced like a
+  // ₦2 welcome/warning message.
+  usageStore.increment(id, { statusPosts: 1 }).catch(() => {});
   console.log(`[${id}][group-status] OK group=${groupId} msgId=${result.key.id}`);
   return { id: result.key.id };
 }

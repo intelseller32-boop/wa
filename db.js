@@ -162,6 +162,20 @@ async function initDb() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     )
   `);
+  // status_posts: real WhatsApp group-status posts (groupStatusMessageV2),
+  // billed separately/higher than ordinary bot messages — see sendGroupStatus().
+  for (const [col, ddl] of [
+    ["status_posts", "BIGINT NOT NULL DEFAULT 0"],
+    ["reported_status_posts", "BIGINT NOT NULL DEFAULT 0"],
+  ]) {
+    const [check] = await p.query(
+      `SELECT COUNT(*) AS n FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'usage_counters' AND COLUMN_NAME = ?`,
+      [col]
+    );
+    if (Number(check[0].n) === 0) {
+      await p.query(`ALTER TABLE usage_counters ADD COLUMN ${col} ${ddl}`);
+    }
+  }
 
   console.log("Connected to MySQL database and verified tables.");
 }
