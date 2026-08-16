@@ -1,10 +1,33 @@
-const {
-  default: makeWASocket,
+// @vkazee/baileys (fork of @whiskeysockets/baileys, added for real WhatsApp
+// "group status" support via groupStatusMessageV2 — see sendGroupStatus()
+// below) publishes as an ESM-only package ("type": "module", no CJS/require
+// build). This file is CommonJS, so it can't `require()` it directly — it
+// has to be loaded with a dynamic import() instead. That's async, so every
+// exported function that touches these bindings awaits `baileysReady`
+// first (see each function below); internal helper functions they call
+// don't need their own await since by the time they run the import has
+// already resolved.
+let makeWASocket,
   DisconnectReason,
   fetchLatestBaileysVersion,
   Browsers,
-  jidNormalizedUser
-} = require("@whiskeysockets/baileys");
+  jidNormalizedUser,
+  generateWAMessageContent,
+  prepareWAMessageMedia;
+
+const baileysReady = import("@vkazee/baileys").then((mod) => {
+  makeWASocket = mod.default;
+  DisconnectReason = mod.DisconnectReason;
+  fetchLatestBaileysVersion = mod.fetchLatestBaileysVersion;
+  Browsers = mod.Browsers;
+  jidNormalizedUser = mod.jidNormalizedUser;
+  generateWAMessageContent = mod.generateWAMessageContent;
+  prepareWAMessageMedia = mod.prepareWAMessageMedia;
+}).catch((err) => {
+  console.error("[accountManager] FAILED to load @vkazee/baileys:", err.message);
+  throw err;
+});
+
 const crypto = require("crypto");
 const P = require("pino");
 const { useDBAuthState } = require("./dbAuthState");
@@ -212,6 +235,7 @@ async function refreshGroups(id, attempt = 0) {
 }
 
 async function startAccount(id, phoneNumber, isRetry = false) {
+  await baileysReady;
   let runtime = liveAccounts.get(id);
   if (!runtime) {
     runtime = {
@@ -810,6 +834,7 @@ function assertSendable(runtime, id) {
 // `groupId` is the group's normal @g.us jid. If `imageUrl` is given, sends
 // it as an image with `text` as the caption instead of a plain text message.
 async function sendGroupMessage(id, groupId, text, imageUrl) {
+  await baileysReady;
   const runtime = liveAccounts.get(id);
   console.log(`[${id}][ad-hub send] group=${groupId} status=${runtime?.status || "unknown"} purpose=${runtime?.purpose || "unknown"} knownGroups=${runtime?.groups?.size ?? "n/a"} hasImage=${!!imageUrl}`);
   assertSendable(runtime, id);
@@ -837,11 +862,103 @@ async function sendGroupMessage(id, groupId, text, imageUrl) {
 // "newsletters") that this account owns or admins. `channelJid` is the
 // channel's @newsletter jid. Same optional `imageUrl` behavior as above.
 async function sendChannelMessage(id, channelJid, text, imageUrl) {
+  await baileysReady;
   const runtime = liveAccounts.get(id);
   console.log(`[${id}][ad-hub send] channel=${channelJid} status=${runtime?.status || "unknown"} purpose=${runtime?.purpose || "unknown"} hasImage=${!!imageUrl}`);
   assertSendable(runtime, id);
   const result = await sendMessageWithOptionalImage(runtime.sock, channelJid, text, imageUrl, id);
   console.log(`[${id}][ad-hub send] OK channel=${channelJid} msgId=${result.key.id}`);
+  return { id: result.key.id };
+}
+
+// Posts a REAL WhatsApp "group status" — the native feature (still a
+// WhatsApp beta as of writing) that shows up in the group's own Status
+// entry, visible only to that group's members, disappearing after 24h.
+// This is NOT the same as sendGroupMessage (an ordinary chat message) and
+// NOT the same as a personal status shared with a group mentioned in it —
+// see groupStatusMessageV2 in @vkazee/baileys. `kind` is "text" | "image" |
+// "video". For text, `text` is required (backgroundColor/font optional,
+// e.g. backgroundColor: "#25D366", font: 0-8). For image/video, `mediaUrl`
+// is required and is downloaded the same way sendMessageWithOptionalImage
+// does; `caption` is optional.
+async function sendGroupStatus(id, groupId, { kind, text, mediaUrl, caption, backgroundColor, font }) {
+  await baileysReady;
+  const runtime = liveAccounts.get(id);
+  console.log(`[${id}][group-status] group=${groupId} kind=${kind} status=${runtime?.status || "unknown"}`);
+  assertSendable(runtime, id);
+  if (!runtime.groups.has(groupId)) {
+    await refreshGroups(id);
+    if (!runtime.groups.has(groupId)) {
+      console.error(`[${id}][group-status] group ${groupId} not found after refresh — not a member`);
+      const err = new Error("This account is no longer a member of that group.");
+      err.code = "NOT_A_MEMBER";
+      throw err;
+    }
+  }
+
+  const sock = runtime.sock;
+  const genOptions = {
+    upload: sock.waUploadToServer,
+    logger,
+    // Baileys resolves link previews via a network call unless disabled —
+    // status text doesn't need it and it only adds latency/failure surface.
+    getUrlInfo: async () => undefined
+  };
+
+  let innerMessage;
+  if (kind === "text") {
+    const cleanText = String(text || "").trim();
+    if (!cleanText) {
+      const err = new Error("text is required for a text status.");
+      err.code = "BAD_INPUT";
+      throw err;
+    }
+    innerMessage = await generateWAMessageContent(
+      { text: cleanText },
+      { ...genOptions, backgroundColor, font }
+    );
+  } else if (kind === "image" || kind === "video") {
+    const cleanUrl = typeof mediaUrl === "string" ? mediaUrl.trim() : "";
+    if (!/^https?:\/\//i.test(cleanUrl)) {
+      const err = new Error("A valid mediaUrl is required for an image/video status.");
+      err.code = "BAD_INPUT";
+      throw err;
+    }
+    console.log(`[${id}][group-status] fetching media: ${cleanUrl}`);
+    const mediaRes = await fetch(cleanUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://imgbb.com/",
+        "Accept": "*/*"
+      }
+    });
+    if (!mediaRes.ok) {
+      throw new Error(`media host returned ${mediaRes.status} for ${cleanUrl}`);
+    }
+    const buffer = Buffer.from(await mediaRes.arrayBuffer());
+    innerMessage = await prepareWAMessageMedia(
+      kind === "image" ? { image: buffer, caption } : { video: buffer, caption },
+      genOptions
+    );
+  } else {
+    const err = new Error('kind must be "text", "image", or "video".');
+    err.code = "BAD_INPUT";
+    throw err;
+  }
+
+  const result = await sock.sendMessage(groupId, {
+    groupStatusMessageV2: { message: innerMessage }
+  });
+  if (!result?.key?.id) {
+    const err = new Error("sendMessage (group status) returned no message key — send likely did not go through.");
+    err.code = "SEND_FAILED";
+    throw err;
+  }
+  // Same accrual-billing path as the bot's own automatic sends (welcome/
+  // warning/kick) — counted against the owner and settled at next renewal,
+  // rather than an instant balance charge. See config.js / usageStore.
+  usageStore.increment(id, { messages: 1 }).catch(() => {});
+  console.log(`[${id}][group-status] OK group=${groupId} msgId=${result.key.id}`);
   return { id: result.key.id };
 }
 
@@ -1043,5 +1160,6 @@ module.exports = {
   clearOrphanedSessions,
   sendGroupMessage,
   sendChannelMessage,
+  sendGroupStatus,
   lookupChannel
 };

@@ -158,6 +158,31 @@ function startServer(port) {
     }
   });
 
+  // Real WhatsApp "group status" (native beta feature) — visible only to
+  // the group's members, disappears after 24h. Distinct from the ordinary
+  // group message endpoint above. body: { kind: "text"|"image"|"video",
+  // text?, mediaUrl?, caption?, backgroundColor?, font? }
+  app.post("/api/accounts/:id/groups/:groupId/status", async (req, res) => {
+    const { id, groupId } = req.params;
+    const { kind, text, mediaUrl, caption, backgroundColor, font } = req.body || {};
+    if (!["text", "image", "video"].includes(kind)) {
+      return res.status(400).json({ ok: false, error: 'kind must be "text", "image", or "video"' });
+    }
+    try {
+      const result = await accountManager.sendGroupStatus(id, groupId, {
+        kind, text, mediaUrl, caption, backgroundColor, font
+      });
+      res.json({ ok: true, messageId: result.id });
+    } catch (err) {
+      console.error(`[${id}] group status send to ${groupId} failed:`, err.message);
+      const status = err.code === "NOT_CONNECTED" ? 409
+        : err.code === "NOT_A_MEMBER" ? 404
+        : err.code === "BAD_INPUT" ? 400
+        : 500;
+      res.status(status).json({ ok: false, error: err.message, code: err.code });
+    }
+  });
+
   // Looks up a WhatsApp Channel by invite link/code/jid and reports whether
   // this account can post to it. Read-only — does not link/follow anything.
   app.post("/api/accounts/:id/channels/lookup", async (req, res) => {
