@@ -469,6 +469,15 @@ async function startAccount(id, phoneNumber, isRetry = false) {
     if (runtime.purpose === "ads") return;
     try {
       const { id: groupId, participants, action } = event;
+
+      // A promote/demote (of anyone, but especially the bot itself) makes
+      // the cached admin set for this group stale immediately — don't wait
+      // out the 5-minute TTL before noticing "I was just made admin".
+      if (action === "promote" || action === "demote") {
+        groupAdminCache.delete(groupId);
+        console.log(`[${id}] group ${groupId}: ${action} event for ${participants.join(", ")} — admin cache invalidated`);
+      }
+
       if (action === "add") {
         const settings = await settingsStore.getSettings(id, groupId);
         if (settings.enabled === "0") return;
@@ -512,34 +521,86 @@ async function startAccount(id, phoneNumber, isRetry = false) {
   const groupAdminCache = new Map();
   const ADMIN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes; avoids hammering groupMetadata (rate-overlimit)
 
+  // WhatsApp now identifies group participants by an opaque @lid (Linked ID)
+  // in most groups, NOT by their phone-number JID (@s.whatsapp.net) — see
+  // WhiskeySockets/Baileys #1505/#1935/#1737. groupMetadata() participants
+  // commonly look like { id: "1234...@lid", lid: "1234...@lid", jid: "" },
+  // while sock.user.id (the bot's own identity) is still a phone-number JID.
+  // Comparing those two forms directly means the bot NEVER matches itself
+  // (or any other admin) in the admin set, even when it genuinely is admin
+  // — which is exactly the "bot keeps asking to be made admin even though
+  // it already is" symptom. Fix: store every known form (id/jid/lid/
+  // phoneNumber) for each admin, and when checking a specific user, also
+  // try their alternate form via Baileys' own lid<->phone-number mapping.
+  function addAllForms(set, participant) {
+    [participant.id, participant.jid, participant.lid, participant.phoneNumber]
+      .filter(Boolean)
+      .forEach((j) => {
+        try { set.add(jidNormalizedUser(j)); } catch { set.add(j); }
+      });
+  }
+
+  async function resolveAlternateForms(jid) {
+    // Best-effort: ask Baileys for the other identifier (phone <-> lid) for
+    // this jid. Returns [] if Baileys hasn't learned the mapping yet.
+    const out = [];
+    try {
+      if (jid.endsWith("@lid")) {
+        const pn = await sock.signalRepository?.lidMapping?.getPNForLID?.(jid);
+        if (pn) out.push(jidNormalizedUser(pn));
+      } else {
+        const lid = await sock.signalRepository?.lidMapping?.getLIDForPN?.(jid);
+        if (lid) out.push(jidNormalizedUser(lid));
+      }
+    } catch (err) {
+      console.warn(`[${id}] lid/pn alt-form lookup failed for ${jid}: ${err.message}`);
+    }
+    return out;
+  }
+
+  async function fetchGroupAdmins(groupId) {
+    const metadata = await sock.groupMetadata(groupId);
+    const admins = new Set();
+    for (const p of metadata.participants) {
+      if (p.admin === "admin" || p.admin === "superadmin") addAllForms(admins, p);
+    }
+    groupAdminCache.set(groupId, { admins, fetchedAt: Date.now() });
+    return admins;
+  }
+
   async function isGroupAdmin(groupId, userId) {
     const cached = groupAdminCache.get(groupId);
+    let admins;
     if (cached && Date.now() - cached.fetchedAt < ADMIN_CACHE_TTL_MS) {
-      return cached.admins.has(userId);
+      admins = cached.admins;
+    } else {
+      try {
+        admins = await fetchGroupAdmins(groupId);
+      } catch (err) {
+        console.error(`[${id}] failed to fetch group metadata for admin check:`, err.message);
+        // Fail closed on the side of NOT moderating if we can't confirm admin status,
+        // to avoid falsely punishing an admin when the lookup itself fails.
+        admins = cached ? cached.admins : new Set();
+      }
     }
 
-    try {
-      const metadata = await sock.groupMetadata(groupId);
-      const admins = new Set(
-        metadata.participants
-          .filter((p) => p.admin === "admin" || p.admin === "superadmin")
-          .map((p) => p.id)
-      );
-      groupAdminCache.set(groupId, { admins, fetchedAt: Date.now() });
-      return admins.has(userId);
-    } catch (err) {
-      console.error(`[${id}] failed to fetch group metadata for admin check:`, err.message);
-      // Fail closed on the side of NOT moderating if we can't confirm admin status,
-      // to avoid falsely punishing an admin when the lookup itself fails.
-      return cached ? cached.admins.has(userId) : false;
-    }
+    const normalized = (() => { try { return jidNormalizedUser(userId); } catch { return userId; } })();
+    if (admins.has(normalized)) return true;
+
+    // Not found under this jid's own form — try its lid/phone-number
+    // counterpart before giving up (covers the mismatch described above).
+    const alternates = await resolveAlternateForms(normalized);
+    return alternates.some((alt) => admins.has(alt));
   }
 
   // Checks whether the bot itself currently has admin rights in a group.
   // Moderation actions (delete-for-everyone, removing a member) silently
   // no-op on WhatsApp's side when the bot isn't admin — Baileys doesn't
   // always throw, so we can't just rely on a catch block to notice.
-  // Reuses the same admin cache/TTL as isGroupAdmin above.
+  // Reuses the same admin cache/TTL (and lid/phone-number resolution) as
+  // isGroupAdmin above — this is what was previously failing to recognize
+  // the bot as admin when the group listed it under its @lid instead of
+  // its phone-number JID.
   async function isBotGroupAdmin(groupId) {
     if (!sock.user?.id) return false;
     const botJid = jidNormalizedUser(sock.user.id);
