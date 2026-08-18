@@ -245,6 +245,7 @@ async function startAccount(id, phoneNumber, isRetry = false) {
       pairingCode: null,
       phoneNumber,
       groups: new Map(),
+      channels: new Map(), // WhatsApp Channels ("newsletters") this account is known to follow — jid -> { name }, populated from chats.upsert/update + messaging-history.set (see registerChannelSync)
       pinnedWelcome: new Map(),
       reconnectAttempts: 0,
       watermark: true
@@ -404,6 +405,23 @@ async function startAccount(id, phoneNumber, isRetry = false) {
   });
 
   sock.ev.on("groups.update", () => refreshGroups(id));
+
+  // Passively collect every WhatsApp Channel ("newsletter") this account is
+  // known to follow, straight from Baileys' own chat sync — no polling, no
+  // extra API calls. This only tells us WHICH channels exist for this
+  // account, not the account's role in each (chat-list entries don't carry
+  // that) — role is resolved on demand per channel via lookupChannel/
+  // getMyRoleInChannel, see listMyChannels().
+  const trackChannelChats = (chats) => {
+    for (const chat of chats || []) {
+      if (chat?.id && chat.id.endsWith("@newsletter")) {
+        runtime.channels.set(chat.id, { name: chat.name || runtime.channels.get(chat.id)?.name || "" });
+      }
+    }
+  };
+  sock.ev.on("messaging-history.set", ({ chats }) => trackChannelChats(chats));
+  sock.ev.on("chats.upsert", (chats) => trackChannelChats(chats));
+  sock.ev.on("chats.update", (chats) => trackChannelChats(chats));
 
   sock.ev.on("group-participants.update", async (event) => {
     // "ads"-purpose accounts (linked from ad-hub's promote.html) only ever
@@ -1064,11 +1082,28 @@ async function lookupChannel(id, rawInput) {
   // doesn't tell us anything real — re-check by jid as a participant.
   if (parsed.mode !== "jid" && (!role || String(role).toUpperCase() === "GUEST")) {
     try {
-      await runtime.sock.newsletterFollow(meta.id);
+      // Try the jid-based lookup FIRST, without following. If this account
+      // already owns/admins/follows the channel — which is the normal case
+      // for a promoter linking their OWN channel, since creating a channel
+      // auto-follows you as its Owner — this alone already returns the
+      // truthful role. Only fall back to newsletterFollow() below if that
+      // truly isn't the case (channel not yet followed at all), since
+      // calling newsletterFollow on a channel this account already follows
+      // throws ("already following"/similar) — that error used to be
+      // swallowed by the catch below with the role check never re-run,
+      // which is why real Owners/Admins were being told they weren't.
       const jidMeta = await runtime.sock.newsletterMetadata("jid", meta.id);
-      if (jidMeta) {
+      let jidRole = jidMeta?.viewer_metadata?.role || jidMeta?.role || null;
+      if (jidMeta && jidRole && String(jidRole).toUpperCase() !== "GUEST") {
         meta = jidMeta;
-        role = meta.viewer_metadata?.role || meta.role || null;
+        role = jidRole;
+      } else {
+        await runtime.sock.newsletterFollow(meta.id);
+        const followedMeta = await runtime.sock.newsletterMetadata("jid", meta.id);
+        if (followedMeta) {
+          meta = followedMeta;
+          role = followedMeta.viewer_metadata?.role || followedMeta.role || null;
+        }
       }
     } catch (followErr) {
       console.warn(`[${id}][ad-hub lookupChannel] follow/re-check failed for ${meta.id}: ${followErr.message}`);
@@ -1079,6 +1114,7 @@ async function lookupChannel(id, rawInput) {
 
   const roleUpper = role ? String(role).toUpperCase() : null;
   const canPost = roleUpper === "OWNER" || roleUpper === "ADMIN";
+  if (meta.id) runtime.channels.set(meta.id, { name: meta.thread_metadata?.name?.text || meta.name || runtime.channels.get(meta.id)?.name || "" });
   return {
     jid: meta.id,
     name: meta.thread_metadata?.name?.text || meta.name || "",
@@ -1088,6 +1124,39 @@ async function lookupChannel(id, rawInput) {
     role: roleUpper,
     canPost
   };
+}
+
+// Auto-detect: every WhatsApp Channel this account is known to follow (from
+// runtime.channels, populated passively by the chat-sync listeners above),
+// each resolved with its live role (Owner / Admin / Subscriber) so the UI
+// can show what the promoter actually holds instead of asking them to paste
+// a link. Resolves channels sequentially rather than in parallel — hammering
+// newsletterMetadata for many channels at once is a good way to get
+// rate-limited by WhatsApp.
+async function listMyChannels(id) {
+  const runtime = liveAccounts.get(id);
+  assertSendable(runtime, id);
+  const jids = [...runtime.channels.keys()];
+  const results = [];
+  for (const jid of jids) {
+    try {
+      const meta = await runtime.sock.newsletterMetadata("jid", jid);
+      if (!meta) continue;
+      const roleUpper = (meta.viewer_metadata?.role || meta.role || null);
+      const role = roleUpper ? String(roleUpper).toUpperCase() : "SUBSCRIBER";
+      results.push({
+        jid: meta.id || jid,
+        name: meta.thread_metadata?.name?.text || meta.name || runtime.channels.get(jid)?.name || "",
+        subscriberCount: meta.thread_metadata?.subscribers_count ?? meta.subscribers_count ?? 0,
+        pictureUrl: meta.thread_metadata?.picture?.url || null,
+        role,
+        canPost: role === "OWNER" || role === "ADMIN"
+      });
+    } catch (err) {
+      console.warn(`[${id}][listMyChannels] couldn't resolve role for ${jid}: ${err.message}`);
+    }
+  }
+  return results;
 }
 
 async function deleteAccount(id) {
@@ -1171,6 +1240,7 @@ async function resumeAccountsFromDB() {
       pairingCode: null,
       phoneNumber: row.phone_number,
       groups: new Map(),
+      channels: new Map(), // see startAccount for what populates this
       pinnedWelcome: new Map(),
       reconnectAttempts: 0,
       paused: row.status === "paused",
@@ -1200,5 +1270,6 @@ module.exports = {
   sendGroupMessage,
   sendChannelMessage,
   sendGroupStatus,
-  lookupChannel
+  lookupChannel,
+  listMyChannels
 };

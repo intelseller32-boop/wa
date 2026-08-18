@@ -201,6 +201,23 @@ function startServer(port) {
     }
   });
 
+  // Auto-detect: every WhatsApp Channel this account is known to follow,
+  // each with its live role (Owner/Admin/Subscriber) so the caller can tell
+  // which ones this account can actually post ads to. See
+  // accountManager.listMyChannels for how the channel list itself is
+  // collected (passively, from Baileys' chat sync — no link/code needed).
+  app.get("/api/accounts/:id/channels/mine", async (req, res) => {
+    const { id } = req.params;
+    try {
+      const channels = await accountManager.listMyChannels(id);
+      res.json({ ok: true, channels });
+    } catch (err) {
+      console.error(`[${id}] listMyChannels failed:`, err.message);
+      const status = err.code === "NOT_CONNECTED" ? 409 : 500;
+      res.status(status).json({ ok: false, error: err.message, code: err.code });
+    }
+  });
+
   app.post("/api/accounts/:id/channels/:channelId/send", async (req, res) => {
     const { id } = req.params;
     const channelId = decodeURIComponent(req.params.channelId);
