@@ -281,7 +281,17 @@ async function startAccount(id, phoneNumber, isRetry = false) {
     printQRInTerminal: false,
     browser: Browsers.ubuntu("Chrome"),
     connectTimeoutMs: 30000,
-    keepAliveIntervalMs: 20000
+    keepAliveIntervalMs: 20000,
+    // Baileys' default "web" sync only sends a shallow/recent slice of
+    // chats on connect — WhatsApp Channels the account follows are often
+    // NOT included in that shallow slice at all, which is why
+    // runtime.channels (and therefore /whatsapp/channels/mine) can come
+    // back completely empty even for an account that visibly follows
+    // channels on its phone. syncFullHistory asks for the fuller sync that
+    // actually includes them. This only takes effect from the NEXT fresh
+    // connection (see the trackChannelChats note below) — flipping this on
+    // doesn't retroactively populate already-connected sessions.
+    syncFullHistory: true
   });
   runtime.sock = sock;
 
@@ -412,16 +422,33 @@ async function startAccount(id, phoneNumber, isRetry = false) {
   // account, not the account's role in each (chat-list entries don't carry
   // that) — role is resolved on demand per channel via lookupChannel/
   // getMyRoleInChannel, see listMyChannels().
-  const trackChannelChats = (chats) => {
-    for (const chat of chats || []) {
+  //
+  // IMPORTANT: this only starts collecting from the moment this specific
+  // startAccount() call's socket connects. An account that was ALREADY
+  // connected before this code shipped is still running its old socket
+  // with none of these listeners attached — it needs a Reconnect (or a
+  // natural reconnect) before its channels start showing up at all.
+  let historySyncSeen = false;
+  const trackChannelChats = (source, chats) => {
+    if (!chats || !chats.length) return;
+    const before = runtime.channels.size;
+    for (const chat of chats) {
       if (chat?.id && chat.id.endsWith("@newsletter")) {
         runtime.channels.set(chat.id, { name: chat.name || runtime.channels.get(chat.id)?.name || "" });
       }
     }
+    const added = runtime.channels.size - before;
+    console.log(`[${id}][channel-sync] ${source}: ${chats.length} chat(s) received, ${added} new @newsletter entrie(s) (total tracked: ${runtime.channels.size})`);
   };
-  sock.ev.on("messaging-history.set", ({ chats }) => trackChannelChats(chats));
-  sock.ev.on("chats.upsert", (chats) => trackChannelChats(chats));
-  sock.ev.on("chats.update", (chats) => trackChannelChats(chats));
+  sock.ev.on("messaging-history.set", ({ chats, isLatest }) => {
+    historySyncSeen = true;
+    trackChannelChats(`messaging-history.set${isLatest ? " (final batch)" : ""}`, chats);
+    if (isLatest && runtime.channels.size === 0) {
+      console.warn(`[${id}][channel-sync] history sync finished with ZERO @newsletter chats seen. If this account really does follow channels on its phone, WhatsApp isn't including them in this sync — try unmuting/reopening the channel on the phone once while connected, which usually forces a chats.upsert for it.`);
+    }
+  });
+  sock.ev.on("chats.upsert", (chats) => trackChannelChats("chats.upsert", chats));
+  sock.ev.on("chats.update", (chats) => trackChannelChats("chats.update", chats));
 
   sock.ev.on("group-participants.update", async (event) => {
     // "ads"-purpose accounts (linked from ad-hub's promote.html) only ever
