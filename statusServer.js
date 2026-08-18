@@ -184,7 +184,10 @@ function startServer(port) {
   });
 
   // Looks up a WhatsApp Channel by invite link/code/jid and reports whether
-  // this account can post to it. Read-only — does not link/follow anything.
+  // this account can post to it. Does NOT create an ad-hub link/DB row, but
+  // it may follow the channel on WhatsApp as a side effect (see
+  // accountManager.lookupChannel) — that's required to read this account's
+  // true Owner/Admin role instead of the public guest-preview role.
   app.post("/api/accounts/:id/channels/lookup", async (req, res) => {
     const { id } = req.params;
     const input = req.body?.input;

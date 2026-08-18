@@ -1025,7 +1025,22 @@ function parseChannelInput(raw) {
 
 // Looks up a channel by invite link/code/jid and reports whether this
 // account can post to it (must be OWNER or ADMIN — regular followers can't
-// send). Read-only: does not follow or link anything.
+// send).
+//
+// IMPORTANT: a lookup done via invite link/code (mode:"invite") hits
+// WhatsApp's public "guest preview" of the channel — the same thing anyone
+// gets from just clicking the link without joining. That endpoint doesn't
+// check the requester's real relationship to the channel at all, so
+// viewer_metadata.role comes back as "GUEST" even when the connected
+// account is genuinely the channel's Owner or an Admin. This is why real
+// admins were being told "You must be the Owner or an Admin" — the code
+// only ever did the guest-preview lookup and trusted its role verbatim.
+//
+// The only way to get a truthful role is to look the channel up again by
+// its jid once we're a known participant, which means following it first
+// if we aren't already. That follow is not a side effect we're smuggling
+// in — this account has to follow the channel to post there at all, so
+// it happens regardless once linking succeeds.
 async function lookupChannel(id, rawInput) {
   const runtime = liveAccounts.get(id);
   assertSendable(runtime, id);
@@ -1035,21 +1050,42 @@ async function lookupChannel(id, rawInput) {
     err.code = "BAD_CHANNEL_INPUT";
     throw err;
   }
-  const meta = await runtime.sock.newsletterMetadata(parsed.mode, parsed.key);
+
+  let meta = await runtime.sock.newsletterMetadata(parsed.mode, parsed.key);
   if (!meta) {
     const err = new Error("Channel not found.");
     err.code = "CHANNEL_NOT_FOUND";
     throw err;
   }
-  const role = meta.viewer_metadata?.role || meta.role || null;
-  const canPost = role === "OWNER" || role === "ADMIN";
+
+  let role = meta.viewer_metadata?.role || meta.role || null;
+
+  // Guest-preview role (or no role at all) from an invite/code lookup
+  // doesn't tell us anything real — re-check by jid as a participant.
+  if (parsed.mode !== "jid" && (!role || String(role).toUpperCase() === "GUEST")) {
+    try {
+      await runtime.sock.newsletterFollow(meta.id);
+      const jidMeta = await runtime.sock.newsletterMetadata("jid", meta.id);
+      if (jidMeta) {
+        meta = jidMeta;
+        role = meta.viewer_metadata?.role || meta.role || null;
+      }
+    } catch (followErr) {
+      console.warn(`[${id}][ad-hub lookupChannel] follow/re-check failed for ${meta.id}: ${followErr.message}`);
+      // Fall through with whatever we already had from the guest preview —
+      // canPost will correctly end up false rather than throwing here.
+    }
+  }
+
+  const roleUpper = role ? String(role).toUpperCase() : null;
+  const canPost = roleUpper === "OWNER" || roleUpper === "ADMIN";
   return {
     jid: meta.id,
     name: meta.thread_metadata?.name?.text || meta.name || "",
     description: meta.thread_metadata?.description?.text || "",
     subscriberCount: meta.thread_metadata?.subscribers_count ?? meta.subscribers_count ?? 0,
     pictureUrl: meta.thread_metadata?.picture?.url || null,
-    role,
+    role: roleUpper,
     canPost
   };
 }
