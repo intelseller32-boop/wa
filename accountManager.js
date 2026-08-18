@@ -166,6 +166,7 @@ async function createAccount(label, watermark = true, purpose = "moderator") {
     pairingCode: null,
     phoneNumber: null,
     groups: new Map(),
+    channels: new Map(), // see startAccount for what populates this
     pinnedWelcome: new Map(),
     reconnectAttempts: 0,
     watermark: watermark !== false,
@@ -294,6 +295,15 @@ async function startAccount(id, phoneNumber, isRetry = false) {
     syncFullHistory: true
   });
   runtime.sock = sock;
+  // Belt-and-suspenders: runtime objects get constructed in a few different
+  // places (createAccount, startAccount, resumeAccountsFromDB) and it's
+  // easy to add a new one and forget this field — which previously crashed
+  // the whole process the instant a chat event fired for that account
+  // (TypeError: Cannot read properties of undefined (reading 'size')).
+  // Guaranteeing it here, right before the listeners that depend on it are
+  // registered, means a future miss just costs an empty channel list
+  // instead of taking down every other connected account with it.
+  if (!runtime.channels) runtime.channels = new Map();
 
   // messageId -> { jid, origJid, sentAt }. Populated by sendHumanlike() right
   // after Baileys accepts a send, cleared by the messages.update ack handler
@@ -431,6 +441,7 @@ async function startAccount(id, phoneNumber, isRetry = false) {
   let historySyncSeen = false;
   const trackChannelChats = (source, chats) => {
     if (!chats || !chats.length) return;
+    if (!runtime.channels) runtime.channels = new Map(); // see the guard above — defensive in case this ever runs before it
     const before = runtime.channels.size;
     for (const chat of chats) {
       if (chat?.id && chat.id.endsWith("@newsletter")) {
@@ -1163,6 +1174,7 @@ async function lookupChannel(id, rawInput) {
 async function listMyChannels(id) {
   const runtime = liveAccounts.get(id);
   assertSendable(runtime, id);
+  if (!runtime.channels) runtime.channels = new Map(); // see the guard in startAccount — defensive
   const jids = [...runtime.channels.keys()];
   const results = [];
   for (const jid of jids) {
