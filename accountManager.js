@@ -218,6 +218,16 @@ async function pauseAccount(id) {
 async function refreshGroups(id, attempt = 0) {
   const runtime = liveAccounts.get(id);
   if (!runtime?.sock) return;
+  // A refresh (or its retry-with-backoff chain) already in flight for this
+  // account — piling another full groupFetchAllParticipating() call on top
+  // of it is exactly what trips WhatsApp's rate limiting (see the
+  // "rate-overlimit" errors this was causing, especially on accounts with
+  // many groups and frequent groups.update events). Let the in-flight one
+  // finish instead of stacking calls.
+  if (attempt === 0) {
+    if (runtime.refreshingGroups) return;
+    runtime.refreshingGroups = true;
+  }
   try {
     const groups = await runtime.sock.groupFetchAllParticipating();
     runtime.groups = new Map(Object.values(groups).map((g) => [g.id, g.subject]));
@@ -231,8 +241,10 @@ async function refreshGroups(id, attempt = 0) {
     if (attempt < 4) {
       const delay = [5000, 15000, 30000, 60000][attempt] || 60000;
       setTimeout(() => refreshGroups(id, attempt + 1), delay);
+      return; // keep refreshingGroups=true until the retry chain finishes
     }
   }
+  runtime.refreshingGroups = false;
 }
 
 async function startAccount(id, phoneNumber, isRetry = false) {
@@ -424,7 +436,17 @@ async function startAccount(id, phoneNumber, isRetry = false) {
     }
   });
 
-  sock.ev.on("groups.update", () => refreshGroups(id));
+  // groups.update fires per-group (subject change, settings change, etc.) —
+  // on an account in dozens of groups these can arrive in bursts. Each one
+  // used to trigger its own full groupFetchAllParticipating() call, which is
+  // exactly what was tripping WhatsApp's rate limiting and knocking the
+  // socket into a disconnect/reconnect loop. Debounce to one refresh per
+  // burst instead.
+  let groupsUpdateDebounce = null;
+  sock.ev.on("groups.update", () => {
+    clearTimeout(groupsUpdateDebounce);
+    groupsUpdateDebounce = setTimeout(() => refreshGroups(id), 4000);
+  });
 
   // Passively collect every WhatsApp Channel ("newsletter") this account is
   // known to follow, straight from Baileys' own chat sync — no polling, no
