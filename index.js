@@ -18,13 +18,47 @@ const NOISY_LIBSIGNAL_PATTERNS = [
   /^Closing (open |stale open )?session/,
   /^Closing session: SessionEntry/,
 ];
+// A SessionEntry (or its raw key material) can arrive as its OWN argument —
+// e.g. console.log(sessionEntryObject) with no leading string at all — in
+// which case checking only args[0] as a string (the original version of
+// this filter) never matches, and the full record (including ephemeral
+// keypair / chain key / root key Buffers) sails straight through to
+// Railway's logs. This is confirmed happening in production: the "Closing
+// session: SessionEntry {...}" dumps kept showing up despite this filter.
+// Check every argument, not just the first, and also recognize a raw
+// SessionEntry-shaped object directly (by its distinctive fields) so it's
+// caught regardless of which argument position it lands in or whether a
+// leading string is present at all.
+function looksLikeSessionEntry(val) {
+  return (
+    val &&
+    typeof val === "object" &&
+    "currentRatchet" in val &&
+    "indexInfo" in val &&
+    "registrationId" in val
+  );
+}
+function isNoisyLibsignalLog(args) {
+  return args.some((a) => {
+    if (typeof a === "string") return NOISY_LIBSIGNAL_PATTERNS.some((re) => re.test(a));
+    return looksLikeSessionEntry(a);
+  });
+}
 const originalConsoleLog = console.log.bind(console);
 console.log = (...args) => {
-  const first = args[0];
-  if (typeof first === "string" && NOISY_LIBSIGNAL_PATTERNS.some((re) => re.test(first))) {
-    return;
-  }
+  if (isNoisyLibsignalLog(args)) return;
   originalConsoleLog(...args);
+};
+// The short-form "Closing open session in favor of incoming prekey bundle" /
+// "Closing session in favor of new session" lines come through on
+// console.error instead of console.log (libsignal logs them at error
+// level) — they don't carry key material so they're not a secrecy problem,
+// but at high message volume across dozens of groups they're still pure
+// noise inflating log line counts. Filter the same patterns there too.
+const originalConsoleError = console.error.bind(console);
+console.error = (...args) => {
+  if (isNoisyLibsignalLog(args)) return;
+  originalConsoleError(...args);
 };
 
 // Baileys sometimes throws from deep inside its own internals in a way that

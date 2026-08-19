@@ -507,10 +507,37 @@ async function startAccount(id, phoneNumber, isRetry = false) {
           console.log(`[${id}] group ${groupId}: bot disabled for this group — skipping welcome message`);
           return;
         }
+        // Separate on/off just for welcome messages (see settingsStore's
+        // welcome_enabled) — lets an owner keep moderation/warnings on but
+        // turn welcome messages off, or vice versa, without one toggle
+        // controlling both.
+        if (settings.welcome_enabled === "0") {
+          console.log(`[${id}] group ${groupId}: welcome messages disabled for this group — skipping`);
+          return;
+        }
         if (!settings.welcome_message || !settings.welcome_message.trim()) {
           console.warn(`[${id}] group ${groupId}: welcome_message is empty — nothing to send`);
         }
-        for (const rawUserId of participants) {
+
+        let sentCount = 0;
+        for (const rawParticipant of participants) {
+          // Some Baileys versions hand this event's `participants` entries
+          // to us as plain jid strings, others as participant objects
+          // (e.g. { id, jid, lid, phoneNumber } — same shape as
+          // groupMetadata().participants). Blindly using the raw value as a
+          // jid breaks the send entirely when it's an object (logs as
+          // "[object Object]" — that's exactly what showed up in
+          // production and meant every downstream jid op below was
+          // operating on garbage). Pull out the actual identifier first.
+          const rawUserId =
+            typeof rawParticipant === "string"
+              ? rawParticipant
+              : rawParticipant?.id || rawParticipant?.jid || rawParticipant?.lid || rawParticipant?.phoneNumber;
+          if (!rawUserId) {
+            console.error(`[${id}] group ${groupId}: couldn't extract a jid from add-event participant:`, JSON.stringify(rawParticipant));
+            continue;
+          }
+
           // "add" events commonly hand us the joiner's opaque @lid rather
           // than their phone-number JID (same rollout documented above for
           // fetchGroupAdmins/isGroupAdmin). Sending straight to/mentioning a
@@ -526,6 +553,17 @@ async function startAccount(id, phoneNumber, isRetry = false) {
             console.log(`[${id}] group ${groupId}: resolved joiner ${rawUserId} -> ${userId} before sending welcome`);
           }
 
+          // When several people are added to a group at once (e.g. someone
+          // bulk-adds 10 contacts), WhatsApp's servers rate-limit a bot
+          // that fires that many messages back-to-back — that's exactly
+          // the "rate-overlimit" errors seen in the Railway logs, and it
+          // can also get the account itself flagged as spammy. Space
+          // sequential welcome sends out with a short human-like gap
+          // instead of firing them all in the same instant.
+          if (sentCount > 0) {
+            await randomDelay(2500, 5000);
+          }
+
           const text = withWatermark(fillTemplate(settings.welcome_message || "", { user: userId }), runtime);
           let sent;
           try {
@@ -534,13 +572,15 @@ async function startAccount(id, phoneNumber, isRetry = false) {
             if (!sentId) {
               console.error(`[${id}] welcome message to ${userId} in ${groupId} returned no message key — send likely did NOT reach WhatsApp despite no error being thrown.`);
             } else {
-              console.log(`[${id}] group ${groupId}: welcome message sent to ${userId} (orig ${rawUserId}), id=${sentId}`);
+              console.log(`[${id}] group ${groupId}: welcome message sent to ${userId} (orig ${JSON.stringify(rawParticipant)}), id=${sentId}`);
             }
             usageStore.increment(id, { messages: 1 }).catch(() => {});
           } catch (err) {
-            console.error(`[${id}] failed to send welcome message to ${userId} (orig ${rawUserId}) in ${groupId}:`, err.message);
+            console.error(`[${id}] failed to send welcome message to ${userId} (orig ${JSON.stringify(rawParticipant)}) in ${groupId}:`, err.message);
+            sentCount++;
             continue;
           }
+          sentCount++;
           await pinWelcomeMessage(groupId, sent);
         }
       }
@@ -1385,7 +1425,7 @@ async function resumeAccountsFromDB() {
   for (const row of rows) {
     liveAccounts.set(row.id, {
       label: row.label,
-      status: row.status === "disconnected" || row.status === "paused" ? row.status : "connecting",
+      status: row.status === "disconnected" || row.status === "paused" || row.status === "error" ? row.status : "connecting",
       qr: null,
       pairingCode: null,
       phoneNumber: row.phone_number,
@@ -1397,10 +1437,25 @@ async function resumeAccountsFromDB() {
       watermark: row.watermark !== 0,
       purpose: row.purpose === "ads" ? "ads" : "moderator"
     });
-    if (row.status !== "disconnected" && row.status !== "paused") {
+    // Accounts saved as 'error' already burned through MAX_RECONNECT_ATTEMPTS
+    // once and gave up on purpose (see the "gave up reconnecting" branch in
+    // connection.update below) — the dashboard explicitly tells the owner to
+    // tap Reconnect to try again. Without this exclusion, an abandoned/
+    // never-linked/logged-out account sitting in 'error' would silently
+    // re-run the ENTIRE up-to-6-attempt reconnect+backoff cycle (each
+    // attempt opening a fresh WhatsApp socket and waiting up to
+    // STALL_TIMEOUT_MS) on every single process restart — deploys, crashes,
+    // Railway's own restarts — forever, for an account nobody is coming
+    // back to finish linking. That's wasted connect attempts piling up
+    // exactly like the "rate-overlimit" cascade seen in the logs, and pure
+    // burned compute time on Railway for zero benefit. Only resume accounts
+    // that were actually in a live/working state when the process stopped.
+    if (row.status !== "disconnected" && row.status !== "paused" && row.status !== "error") {
       startAccount(row.id, row.phone_number).catch((err) =>
         console.error(`Failed to resume account ${row.id}:`, err.message)
       );
+    } else if (row.status === "error") {
+      console.log(`[${row.id}] not auto-resuming — left in 'error' from a previous run. Reconnect it manually from the dashboard if it's still needed.`);
     }
   }
 }

@@ -11,6 +11,12 @@ const DEFAULT_SETTINGS = {
   // silently started moderating and demanding admin rights the moment
   // it saw a violating message, before the owner had a chance to say yes.
   enabled: "0",
+  // Separate from `enabled` (which gates ALL moderation) so an owner can
+  // turn welcome messages off on their own without disabling banned-word/
+  // link moderation, warnings, and auto-replies too. Defaults ON so
+  // existing groups keep their current welcome behavior after this field
+  // is introduced.
+  welcome_enabled: "1",
   welcome_message: defaults.WELCOME_MESSAGE,
   warning_message: defaults.WARNING_MESSAGE,
   kick_message: defaults.KICK_MESSAGE,

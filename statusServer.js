@@ -270,6 +270,7 @@ function startServer(port) {
     // payload should never wipe or crash on the fields it didn't include.
     const updates = {};
     if ("enabled" in body) updates.enabled = body.enabled === "0" ? "0" : "1";
+    if ("welcome_enabled" in body) updates.welcome_enabled = body.welcome_enabled === "0" ? "0" : "1";
     if ("welcome_message" in body) updates.welcome_message = body.welcome_message;
     if ("warning_message" in body) updates.warning_message = body.warning_message;
     if ("kick_message" in body) updates.kick_message = body.kick_message;
