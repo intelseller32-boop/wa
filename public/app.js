@@ -441,6 +441,11 @@ async function renderGroupSettings(accountId, groupId) {
         <option value="0" ${s.enabled === "0" ? "selected" : ""}>Disabled — bot stays in the group but does nothing</option>
       </select>
 
+      <label class="checkbox-row" style="display:flex;align-items:center;gap:8px;margin-top:14px">
+        <input type="checkbox" name="welcome_enabled" ${s.welcome_enabled !== "0" ? "checked" : ""} />
+        Send welcome message when someone joins
+      </label>
+
       <label>Welcome message (use {user} for the mention)</label>
       <textarea name="welcome_message" rows="3">${escapeHtml(s.welcome_message)}</textarea>
 
@@ -512,7 +517,7 @@ async function renderGroupSettings(accountId, groupId) {
     e.preventDefault();
     const fd = new FormData(e.target);
     const body = Object.fromEntries(fd.entries());
-    ["ban_links", "ban_stickers", "ban_status_mentions", "respect_admins"].forEach((field) => {
+    ["welcome_enabled", "ban_links", "ban_stickers", "ban_status_mentions", "respect_admins"].forEach((field) => {
       const el = e.target.querySelector(`[name="${field}"]`);
       if (el) body[field] = el.checked ? "1" : "0";
     });
