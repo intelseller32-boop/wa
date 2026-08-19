@@ -491,6 +491,7 @@ async function startAccount(id, phoneNumber, isRetry = false) {
     if (runtime.purpose === "ads") return;
     try {
       const { id: groupId, participants, action } = event;
+      console.log(`[${id}] group-participants.update: group=${groupId} action=${action} participants=${(participants||[]).join(", ")}`);
 
       // A promote/demote (of anyone, but especially the bot itself) makes
       // the cached admin set for this group stale immediately — don't wait
@@ -502,15 +503,22 @@ async function startAccount(id, phoneNumber, isRetry = false) {
 
       if (action === "add") {
         const settings = await settingsStore.getSettings(id, groupId);
-        if (settings.enabled === "0") return;
+        if (settings.enabled === "0") {
+          console.log(`[${id}] group ${groupId}: bot disabled for this group — skipping welcome message`);
+          return;
+        }
+        if (!settings.welcome_message || !settings.welcome_message.trim()) {
+          console.warn(`[${id}] group ${groupId}: welcome_message is empty — nothing to send`);
+        }
         for (const userId of participants) {
           const text = withWatermark(fillTemplate(settings.welcome_message || "", { user: userId }), runtime);
           let sent;
           try {
             sent = await sock.sendMessage(groupId, { text, mentions: [userId] });
+            console.log(`[${id}] group ${groupId}: welcome message sent to ${userId}`);
             usageStore.increment(id, { messages: 1 }).catch(() => {});
           } catch (err) {
-            console.error(`[${id}] failed to send welcome message:`, err.message);
+            console.error(`[${id}] failed to send welcome message to ${userId} in ${groupId}:`, err.message);
             continue;
           }
           await pinWelcomeMessage(groupId, sent);

@@ -2,7 +2,15 @@ const { getPool, isConfigured } = require("./db");
 const defaults = require("./config");
 
 const DEFAULT_SETTINGS = {
-  enabled: "1",
+  // New/never-configured groups must start OFF — the dashboard's own
+  // toggle-loading code (public/wabot's group-enable-checkbox handler,
+  // in the marketplace project) explicitly says "groups are off by
+  // default, the owner has to deliberately opt each one in". This used
+  // to be "1" here, which contradicted that: any group the bot was ever
+  // added to — including ones the owner never opened the dashboard for —
+  // silently started moderating and demanding admin rights the moment
+  // it saw a violating message, before the owner had a chance to say yes.
+  enabled: "0",
   welcome_message: defaults.WELCOME_MESSAGE,
   warning_message: defaults.WARNING_MESSAGE,
   kick_message: defaults.KICK_MESSAGE,
