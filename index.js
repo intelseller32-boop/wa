@@ -4,6 +4,29 @@ if (typeof globalThis.crypto === "undefined") {
   globalThis.crypto = require("node:crypto").webcrypto;
 }
 
+// Baileys' bundled libsignal implementation calls console.log directly
+// whenever it closes/replaces a Signal Protocol session (a routine part of
+// normal key ratcheting, not an error) — this completely bypasses the pino
+// "silent" logger passed to makeWASocket below, since it's hard-coded in
+// the dependency itself. It dumps the full session record, including raw
+// key material (ephemeral keypair, chain key, root key), which then gets
+// split into dozens of separate log lines by Railway's log shipper. That's
+// pure noise, and cryptographic key bytes have no business sitting in log
+// output at all. Filter just these known-benign lines; everything else
+// (including our own console.log/console.error calls) is untouched.
+const NOISY_LIBSIGNAL_PATTERNS = [
+  /^Closing (open |stale open )?session/,
+  /^Closing session: SessionEntry/,
+];
+const originalConsoleLog = console.log.bind(console);
+console.log = (...args) => {
+  const first = args[0];
+  if (typeof first === "string" && NOISY_LIBSIGNAL_PATTERNS.some((re) => re.test(first))) {
+    return;
+  }
+  originalConsoleLog(...args);
+};
+
 // Baileys sometimes throws from deep inside its own internals in a way that
 // never passes through any of our try/catch blocks — e.g. a decrypt-retry
 // request (sendRetryRequest, triggered by a burst of "Bad MAC" session
