@@ -510,15 +510,35 @@ async function startAccount(id, phoneNumber, isRetry = false) {
         if (!settings.welcome_message || !settings.welcome_message.trim()) {
           console.warn(`[${id}] group ${groupId}: welcome_message is empty — nothing to send`);
         }
-        for (const userId of participants) {
+        for (const rawUserId of participants) {
+          // "add" events commonly hand us the joiner's opaque @lid rather
+          // than their phone-number JID (same rollout documented above for
+          // fetchGroupAdmins/isGroupAdmin). Sending straight to/mentioning a
+          // raw, unresolved @lid is exactly the "Baileys accepts the call,
+          // nothing reaches the group" failure mode resolvePreferredJid()
+          // already guards against for DMs — apply the same normalize +
+          // prefer-phone-number-JID resolution here so newly-added members
+          // actually receive the welcome message instead of it silently
+          // vanishing.
+          const normalized = (() => { try { return jidNormalizedUser(rawUserId); } catch { return rawUserId; } })();
+          const userId = await resolvePreferredJid(normalized);
+          if (userId !== rawUserId) {
+            console.log(`[${id}] group ${groupId}: resolved joiner ${rawUserId} -> ${userId} before sending welcome`);
+          }
+
           const text = withWatermark(fillTemplate(settings.welcome_message || "", { user: userId }), runtime);
           let sent;
           try {
             sent = await sock.sendMessage(groupId, { text, mentions: [userId] });
-            console.log(`[${id}] group ${groupId}: welcome message sent to ${userId}`);
+            const sentId = sent?.key?.id;
+            if (!sentId) {
+              console.error(`[${id}] welcome message to ${userId} in ${groupId} returned no message key — send likely did NOT reach WhatsApp despite no error being thrown.`);
+            } else {
+              console.log(`[${id}] group ${groupId}: welcome message sent to ${userId} (orig ${rawUserId}), id=${sentId}`);
+            }
             usageStore.increment(id, { messages: 1 }).catch(() => {});
           } catch (err) {
-            console.error(`[${id}] failed to send welcome message to ${userId} in ${groupId}:`, err.message);
+            console.error(`[${id}] failed to send welcome message to ${userId} (orig ${rawUserId}) in ${groupId}:`, err.message);
             continue;
           }
           await pinWelcomeMessage(groupId, sent);
