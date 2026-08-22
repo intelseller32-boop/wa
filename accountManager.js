@@ -1040,10 +1040,14 @@ function assertSendable(runtime, id) {
 // Sends a plain-text ad post into a group this account is a member of.
 // `groupId` is the group's normal @g.us jid. If `imageUrl` is given, sends
 // it as an image with `text` as the caption instead of a plain text message.
-async function sendGroupMessage(id, groupId, text, imageUrl) {
+// `buttons` (optional): array of { text, url } — up to 2 real tappable
+// CTA buttons (WhatsApp's "cta_url" native flow button). If omitted or if
+// sending them fails for any reason, falls back to the old plain
+// text/image-caption message so the ad still goes out either way.
+async function sendGroupMessage(id, groupId, text, imageUrl, buttons) {
   await baileysReady;
   const runtime = liveAccounts.get(id);
-  console.log(`[${id}][ad-hub send] group=${groupId} status=${runtime?.status || "unknown"} purpose=${runtime?.purpose || "unknown"} knownGroups=${runtime?.groups?.size ?? "n/a"} hasImage=${!!imageUrl}`);
+  console.log(`[${id}][ad-hub send] group=${groupId} status=${runtime?.status || "unknown"} purpose=${runtime?.purpose || "unknown"} knownGroups=${runtime?.groups?.size ?? "n/a"} hasImage=${!!imageUrl} buttons=${buttons?.length || 0}`);
   assertSendable(runtime, id);
   if (!runtime.groups.has(groupId)) {
     // The cached group list can be empty/stale right after a reconnect (e.g.
@@ -1060,20 +1064,21 @@ async function sendGroupMessage(id, groupId, text, imageUrl) {
     }
     console.log(`[${id}][ad-hub send] group ${groupId} found after refresh — proceeding`);
   }
-  const result = await sendMessageWithOptionalImage(runtime.sock, groupId, text, imageUrl, id);
+  const result = await sendMessageWithOptionalImage(runtime.sock, groupId, text, imageUrl, id, buttons);
   console.log(`[${id}][ad-hub send] OK group=${groupId} msgId=${result.key.id}`);
   return { id: result.key.id };
 }
 
 // Sends a plain-text ad post into a WhatsApp Channel (Baileys calls these
 // "newsletters") that this account owns or admins. `channelJid` is the
-// channel's @newsletter jid. Same optional `imageUrl` behavior as above.
-async function sendChannelMessage(id, channelJid, text, imageUrl) {
+// channel's @newsletter jid. Same optional `imageUrl`/`buttons` behavior as
+// sendGroupMessage above.
+async function sendChannelMessage(id, channelJid, text, imageUrl, buttons) {
   await baileysReady;
   const runtime = liveAccounts.get(id);
-  console.log(`[${id}][ad-hub send] channel=${channelJid} status=${runtime?.status || "unknown"} purpose=${runtime?.purpose || "unknown"} hasImage=${!!imageUrl}`);
+  console.log(`[${id}][ad-hub send] channel=${channelJid} status=${runtime?.status || "unknown"} purpose=${runtime?.purpose || "unknown"} hasImage=${!!imageUrl} buttons=${buttons?.length || 0}`);
   assertSendable(runtime, id);
-  const result = await sendMessageWithOptionalImage(runtime.sock, channelJid, text, imageUrl, id);
+  const result = await sendMessageWithOptionalImage(runtime.sock, channelJid, text, imageUrl, id, buttons);
   console.log(`[${id}][ad-hub send] OK channel=${channelJid} msgId=${result.key.id}`);
   return { id: result.key.id };
 }
@@ -1172,6 +1177,35 @@ async function sendGroupStatus(id, groupId, { kind, text, mediaUrl, caption, bac
   return { id: result.key.id };
 }
 
+// Builds the interactiveButtons array @vkazee/baileys expects for
+// "cta_url" native flow buttons — WhatsApp's real tappable button type
+// (same underlying feature WhatsApp Business API calls a "Visit Website"
+// button). Each entry needs display_text + url (merchant_url mirrors url;
+// it's WhatsApp's own field for a "visit business" trust indicator, not
+// something we need to differ from the actual destination). Silently
+// drops any entry missing text/url rather than sending a malformed button.
+function buildCtaButtons(buttons) {
+  if (!Array.isArray(buttons) || !buttons.length) return null;
+  const cleaned = buttons
+    .map(b => ({
+      text: String(b?.text || "").trim(),
+      url: String(b?.url || "").trim()
+    }))
+    .filter(b => b.text && /^https?:\/\//i.test(b.url));
+  if (!cleaned.length) return null;
+  // WhatsApp's own client caps interactive messages at a small number of
+  // buttons; 2 is what this project needs (Learn More + advertiser's own
+  // CTA) and comfortably inside that limit.
+  return cleaned.slice(0, 3).map(b => ({
+    name: "cta_url",
+    buttonParamsJson: JSON.stringify({
+      display_text: b.text,
+      url: b.url,
+      merchant_url: b.url
+    })
+  }));
+}
+
 // Shared by sendGroupMessage/sendChannelMessage. If imageUrl looks like a
 // valid http(s) URL, downloads it ourselves and sends it as an image with
 // `text` as its caption. We fetch the bytes ourselves (rather than handing
@@ -1179,11 +1213,50 @@ async function sendGroupStatus(id, groupId, { kind, text, mediaUrl, caption, bac
 // sends no special headers, and hosts like imgbb hotlink-block bare
 // requests like that (returns 404) — the same reason this project already
 // has an /api/image-proxy route with a spoofed User-Agent/Referer for imgbb.
-// On any failure to fetch/send the image, falls back to a plain text
-// message so the ad still goes out rather than silently disappearing.
-async function sendMessageWithOptionalImage(sock, jid, text, imageUrl, id) {
+//
+// `buttons` (optional): array of { text, url } — up to a few real tappable
+// CTA buttons. This is a reverse-engineered WhatsApp protocol feature (not
+// an official Meta API), so it's wrapped in its own try/catch: if building
+// or sending the interactive-button version fails for ANY reason (a future
+// WhatsApp protocol change, malformed input, etc.), this silently falls
+// back to the plain image-caption/text message that always worked before —
+// the ad still goes out either way, just without the extra tappable
+// buttons that time.
+async function sendMessageWithOptionalImage(sock, jid, text, imageUrl, id, buttons) {
   const cleanUrl = typeof imageUrl === "string" ? imageUrl.trim() : "";
   const hasImage = /^https?:\/\//i.test(cleanUrl);
+  const ctaButtons = buildCtaButtons(buttons);
+
+  // ── Preferred path: real interactive CTA button(s) ──
+  if (ctaButtons) {
+    try {
+      let content;
+      if (hasImage) {
+        console.log(`[${id}][ad-hub send] fetching image (buttons): ${cleanUrl}`);
+        const imgRes = await fetch(cleanUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://imgbb.com/",
+            "Accept": "image/webp,image/apng,image/*,*/*;q=0.8"
+          }
+        });
+        if (!imgRes.ok) throw new Error(`image host returned ${imgRes.status} for ${cleanUrl}`);
+        const buffer = Buffer.from(await imgRes.arrayBuffer());
+        content = { image: buffer, caption: text, interactiveButtons: ctaButtons };
+      } else {
+        content = { text, interactiveButtons: ctaButtons };
+      }
+      const result = await sock.sendMessage(jid, content);
+      if (!result?.key?.id) throw new Error("sendMessage (interactive) returned no message key");
+      console.log(`[${id}][ad-hub send] sent with ${ctaButtons.length} CTA button(s)`);
+      return result;
+    } catch (err) {
+      console.error(`[${id}][ad-hub send] interactive-button send failed (${err.message}) — falling back to plain image/text for ${jid}`);
+      // fall through to the plain-message path below
+    }
+  }
+
+  // ── Fallback: plain image-caption or text message (no buttons) ──
   if (hasImage) {
     try {
       console.log(`[${id}][ad-hub send] fetching image: ${cleanUrl}`);

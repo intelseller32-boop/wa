@@ -147,9 +147,14 @@ function startServer(port) {
     const { id, groupId } = req.params;
     const text = String(req.body?.text || "").trim();
     const imageUrl = req.body?.imageUrl ? String(req.body.imageUrl).trim() : "";
+    // Optional: [{ text, url }, ...] — real tappable CTA buttons (e.g. a
+    // fixed "Learn more" plus the advertiser's own custom button text).
+    // Validated/cleaned again inside sendMessageWithOptionalImage, so a
+    // malformed entry here just gets dropped rather than breaking the send.
+    const buttons = Array.isArray(req.body?.buttons) ? req.body.buttons : undefined;
     if (!text) return res.status(400).json({ error: "text is required" });
     try {
-      const result = await accountManager.sendGroupMessage(id, groupId, text, imageUrl);
+      const result = await accountManager.sendGroupMessage(id, groupId, text, imageUrl, buttons);
       res.json({ ok: true, messageId: result.id });
     } catch (err) {
       console.error(`[${id}] ad send to group ${groupId} failed:`, err.message);
@@ -223,9 +228,10 @@ function startServer(port) {
     const channelId = decodeURIComponent(req.params.channelId);
     const text = String(req.body?.text || "").trim();
     const imageUrl = req.body?.imageUrl ? String(req.body.imageUrl).trim() : "";
+    const buttons = Array.isArray(req.body?.buttons) ? req.body.buttons : undefined;
     if (!text) return res.status(400).json({ error: "text is required" });
     try {
-      const result = await accountManager.sendChannelMessage(id, channelId, text, imageUrl);
+      const result = await accountManager.sendChannelMessage(id, channelId, text, imageUrl, buttons);
       res.json({ ok: true, messageId: result.id });
     } catch (err) {
       console.error(`[${id}] ad send to channel ${channelId} failed:`, err.message);
