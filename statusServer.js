@@ -240,6 +240,28 @@ function startServer(port) {
     }
   });
 
+  // Test-only: sends straight to a personal 1:1 chat (phone number, not a
+  // group/channel). Exists purely so a real send with interactive CTA
+  // buttons can be manually checked in a DM — useful for confirming
+  // whether WhatsApp actually renders buttons there vs. silently
+  // stripping them in groups, since server logs alone can't show that
+  // (the send succeeds either way; only what actually renders differs).
+  // phone: digits only, international format, no "+" (e.g. 2348012345678).
+  app.post("/api/accounts/:id/dm/:phone/send-test", async (req, res) => {
+    const { id, phone } = req.params;
+    const text = String(req.body?.text || "Test message from wa-main").trim();
+    const imageUrl = req.body?.imageUrl ? String(req.body.imageUrl).trim() : "";
+    const buttons = Array.isArray(req.body?.buttons) ? req.body.buttons : undefined;
+    try {
+      const result = await accountManager.sendDirectMessage(id, phone, text, imageUrl, buttons);
+      res.json({ ok: true, messageId: result.id });
+    } catch (err) {
+      console.error(`[${id}] test DM send to ${phone} failed:`, err.message);
+      const status = err.code === "NOT_CONNECTED" ? 409 : 500;
+      res.status(status).json({ ok: false, error: err.message, code: err.code });
+    }
+  });
+
   app.get("/api/accounts/:id/qr.png", async (req, res) => {
     const runtime = accountManager.getAccountRuntime(req.params.id);
     if (!runtime?.qr) return res.status(404).send("No QR available right now.");

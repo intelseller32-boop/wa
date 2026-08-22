@@ -1083,6 +1083,27 @@ async function sendChannelMessage(id, channelJid, text, imageUrl, buttons) {
   return { id: result.key.id };
 }
 
+// Sends a message straight to a personal 1:1 chat (a phone number, not a
+// group or channel). Mainly for manually testing things like the
+// interactive CTA buttons — e.g. checking whether WhatsApp actually
+// renders them in a DM vs silently stripping them in a group, since that
+// distinction can't be tested any other way. `phoneOrJid` accepts either
+// a bare phone number in international format with no "+" or spaces
+// (e.g. "2348012345678") or an already-formed "...@s.whatsapp.net" jid.
+// No membership check needed here (unlike groups) since DMs don't have
+// that concept. Same optional `imageUrl`/`buttons` behavior as the
+// group/channel senders above.
+async function sendDirectMessage(id, phoneOrJid, text, imageUrl, buttons) {
+  await baileysReady;
+  const runtime = liveAccounts.get(id);
+  const jid = phoneOrJid.includes("@") ? phoneOrJid : `${phoneOrJid.replace(/[^0-9]/g, "")}@s.whatsapp.net`;
+  console.log(`[${id}][dm-test send] to=${jid} status=${runtime?.status || "unknown"} hasImage=${!!imageUrl} buttons=${buttons?.length || 0}`);
+  assertSendable(runtime, id);
+  const result = await sendMessageWithOptionalImage(runtime.sock, jid, text, imageUrl, id, buttons);
+  console.log(`[${id}][dm-test send] OK to=${jid} msgId=${result.key.id}`);
+  return { id: result.key.id };
+}
+
 // Posts a REAL WhatsApp "group status" — the native feature (still a
 // WhatsApp beta as of writing) that shows up in the group's own Status
 // entry, visible only to that group's members, disappearing after 24h.
@@ -1547,6 +1568,7 @@ module.exports = {
   clearOrphanedSessions,
   sendGroupMessage,
   sendChannelMessage,
+  sendDirectMessage,
   sendGroupStatus,
   lookupChannel,
   listMyChannels
