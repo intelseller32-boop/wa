@@ -51,10 +51,21 @@ function serializeAccount(a, runtime) {
     ? Array.from(runtime.groups.entries()).map(([id, name]) => ({ id, name }))
     : [];
   const base = describeStatus(status);
+  // a.phone_number/runtime.phoneNumber is only ever populated for accounts
+  // created via pairing-code login — QR-scanned accounts never get it set.
+  // sock.user.id (once connected) is WhatsApp's own live identity for this
+  // session regardless of login method, formatted like
+  // "2348012345678:12@s.whatsapp.net" — extracting the leading digits
+  // gives the REAL connected number for any account, so this is the
+  // reliable field to use when you need to confirm which phone a given
+  // account actually is (e.g. before sending a test DM to yourself).
+  const rawUserId = runtime?.sock?.user?.id || "";
+  const connectedNumber = (rawUserId.match(/^(\d+)/) || [])[1] || "";
   return {
     id: a.id,
     label: a.label,
     phone_number: a.phone_number || runtime?.phoneNumber || "",
+    connectedNumber,
     status,
     ...base,
     helper: runtime?.lastError || base.helper,
